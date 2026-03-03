@@ -3,6 +3,7 @@ package dc
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"sort"
 	"sync"
@@ -81,28 +82,20 @@ func Init() {
 func probeAllDCs() []DCProbeResult {
 	// Collect all DCs to probe
 	allDCs := make(map[int][]Addr)
-	for id, addrs := range DefaultDCs {
-		allDCs[id] = addrs
-	}
-	for id, addrs := range CDNDCs {
-		allDCs[id] = addrs
-	}
+	maps.Copy(allDCs, DefaultDCs)
+	maps.Copy(allDCs, CDNDCs)
 
 	var wg sync.WaitGroup
 	results := make([]DCProbeResult, 0, len(allDCs))
 	var mu sync.Mutex
 
 	for dcID, addrs := range allDCs {
-		dcID := dcID
-		addrs := addrs
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			dcResult := probeDC(dcID, addrs)
 			mu.Lock()
 			results = append(results, dcResult)
 			mu.Unlock()
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -123,15 +116,12 @@ func probeDC(dcID int, addrs []Addr) DCProbeResult {
 	var mu sync.Mutex
 
 	for _, addr := range addrs {
-		addr := addr
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			pr := probeAddr(addr)
 			mu.Lock()
 			result.Results = append(result.Results, pr)
 			mu.Unlock()
-		}()
+		})
 	}
 
 	wg.Wait()

@@ -54,8 +54,7 @@ func parseProxyProtoV1(data []byte) (*ProxyProtoResult, error) {
 		return nil, fmt.Errorf("proxy protocol v1: incomplete header")
 	}
 
-	line := string(data[:idx])
-	parts := bytes.Fields([]byte(line))
+	parts := bytes.Fields(data[:idx])
 
 	if len(parts) < 2 {
 		return nil, fmt.Errorf("proxy protocol v1: invalid header")

@@ -57,7 +57,7 @@ func TestFullPipe_FakeTLSPlusO2(t *testing.T) {
 	}()
 
 	// Wait for both with timeout
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case err := <-done:
 			if err != nil {
@@ -81,17 +81,13 @@ func TestTLSRecordRoundTrip(t *testing.T) {
 	var writeErr, readErr error
 
 	// Writer
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		serverConn := faketls.NewConn(server)
 		writeErr = serverConn.WriteTLSRecord(faketls.RecordTypeApplicationData, testPayload)
-	}()
+	})
 
 	// Reader
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		clientConn := faketls.NewConn(client)
 		record, err := clientConn.ReadTLSRecord()
 		if err != nil {
@@ -107,7 +103,7 @@ func TestTLSRecordRoundTrip(t *testing.T) {
 		if !bytes.Equal(record.Payload, testPayload) {
 			t.Error("Payload mismatch")
 		}
-	}()
+	})
 
 	wg.Wait()
 
@@ -146,18 +142,14 @@ func TestO2CipherSymmetry(t *testing.T) {
 	received := make([]byte, len(testData))
 
 	// Server writes
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, writeErr = serverO2.Write(testData)
-	}()
+	})
 
 	// Client reads
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, readErr = io.ReadFull(clientO2, received)
-	}()
+	})
 
 	wg.Wait()
 
@@ -185,38 +177,30 @@ func TestRelay_Bidirectional(t *testing.T) {
 	var clientWriteErr, serverWriteErr, clientReadErr, serverReadErr error
 
 	// Client sends, server receives
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, clientWriteErr = client.Write(clientData)
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		buf := make([]byte, len(clientData))
 		_, serverReadErr = io.ReadFull(server, buf)
 		if serverReadErr == nil && !bytes.Equal(buf, clientData) {
 			t.Error("Server received wrong data")
 		}
-	}()
+	})
 
 	// Server sends, client receives
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, serverWriteErr = server.Write(serverData)
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		buf := make([]byte, len(serverData))
 		_, clientReadErr = io.ReadFull(client, buf)
 		if clientReadErr == nil && !bytes.Equal(buf, serverData) {
 			t.Error("Client received wrong data")
 		}
-	}()
+	})
 
 	wg.Wait()
 
@@ -250,18 +234,14 @@ func TestRelay_LargePayload(t *testing.T) {
 	received := make([]byte, payloadSize)
 
 	// Writer
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, writeErr = server.Write(payload)
-	}()
+	})
 
 	// Reader
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, readErr = io.ReadFull(client, received)
-	}()
+	})
 
 	wg.Wait()
 
@@ -391,9 +371,7 @@ func TestMultipleTLSRecords(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Writer
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		serverConn := faketls.NewConn(server)
 		for _, msg := range messages {
 			if err := serverConn.WriteTLSRecord(faketls.RecordTypeApplicationData, []byte(msg)); err != nil {
@@ -401,12 +379,10 @@ func TestMultipleTLSRecords(t *testing.T) {
 				return
 			}
 		}
-	}()
+	})
 
 	// Reader
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		clientConn := faketls.NewConn(client)
 		for i, expected := range messages {
 			record, err := clientConn.ReadTLSRecord()
@@ -420,7 +396,7 @@ func TestMultipleTLSRecords(t *testing.T) {
 			}
 			faketls.ReleaseRecord(record)
 		}
-	}()
+	})
 
 	wg.Wait()
 }
@@ -437,54 +413,46 @@ func TestConcurrentReadWrite(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Client writes to server
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < numMessages; i++ {
+	wg.Go(func() {
+		for range numMessages {
 			msg := make([]byte, messageSize)
 			rand.Read(msg)
 			if _, err := client.Write(msg); err != nil {
 				return
 			}
 		}
-	}()
+	})
 
 	// Server reads from client
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < numMessages; i++ {
+	wg.Go(func() {
+		for range numMessages {
 			buf := make([]byte, messageSize)
 			if _, err := io.ReadFull(server, buf); err != nil {
 				return
 			}
 		}
-	}()
+	})
 
 	// Server writes to client (concurrent)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < numMessages; i++ {
+	wg.Go(func() {
+		for range numMessages {
 			msg := make([]byte, messageSize)
 			rand.Read(msg)
 			if _, err := server.Write(msg); err != nil {
 				return
 			}
 		}
-	}()
+	})
 
 	// Client reads from server (concurrent)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < numMessages; i++ {
+	wg.Go(func() {
+		for range numMessages {
 			buf := make([]byte, messageSize)
 			if _, err := io.ReadFull(client, buf); err != nil {
 				return
 			}
 		}
-	}()
+	})
 
 	// Use timeout to detect deadlock
 	done := make(chan struct{})

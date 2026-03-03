@@ -44,9 +44,16 @@
 
 ### Operations
 - **Multi-user Support** — Named secrets with per-user tracking and logging
+- **Connection Tracking** — Unique connection IDs for easy log correlation
+- **Connection Limits** — Per IP+secret limits using blake3 hashing with sharded maps
 - **DC Probing** — Automatic RTT-based DC address sorting at startup
 - **Graceful Shutdown** — Clean connection draining on SIGTERM/SIGINT
 - **Structured Logging** — JSON and text output with configurable levels
+
+### Deployment
+- **Unix Socket Support** — Bind to Unix sockets for reverse proxy setups
+- **PROXY Protocol** — Accept v1/v2 headers from HAProxy/nginx to preserve client IPs
+- **SOCKS5 Upstream** — Route DC connections through SOCKS5 proxy (Hysteria2, VLESS, etc.)
 
 ---
 
@@ -109,11 +116,18 @@ The `-l` flag prints Telegram proxy links with auto-detected public IP.
 ### Config Reference
 
 ```toml
-# Network binding
+# Network binding (TCP or Unix socket)
 bind-to = "0.0.0.0:443"
+# bind-to = "/run/telego/telego.sock"  # Unix socket
 
-# Log level: debug, info, warn, error
+# Log level: trace, debug, info, warn, error
 log-level = "info"
+
+# Accept incoming PROXY protocol headers (from HAProxy/nginx)
+# proxy-protocol = false
+
+# Maximum connections per IP+secret (0 = unlimited)
+# max-connections-per-ip = 10
 
 # Named secrets (hex format, 32 chars = 16 bytes)
 # Generate with: telego generate <hostname>
@@ -129,13 +143,17 @@ mask-host = "www.google.com"  # Host to mimic (SNI validation, proxy links)
 # cert-port = 8443            # Cert fetch port (default: mask-port)
 # splice-host = "127.0.0.1"   # Forward unrecognized clients here (default: mask-host)
 # splice-port = 8080          # Splice port (default: mask-port)
-# splice-proxy-protocol = 1   # PROXY protocol: 0=off, 1=v1(text), 2=v2(binary)
+# splice-proxy-protocol = 1   # PROXY protocol to splice: 0=off, 1=v1(text), 2=v2(binary)
 
 # Performance tuning (all optional)
 [performance]
 prefer-ip = "prefer-ipv4"    # prefer-ipv4, prefer-ipv6, only-ipv4, only-ipv6
 idle-timeout = "5m"          # Connection idle timeout
 num-event-loops = 0          # 0 = auto (all CPU cores)
+
+# Upstream (DC connection) settings
+[upstream]
+# socks5 = "127.0.0.1:1080"  # Route DC traffic through SOCKS5 proxy
 ```
 
 ---
@@ -193,6 +211,45 @@ docker run -d -p 443:443 -v ./config.toml:/config.toml telego
 
 ---
 
+## Behind a Reverse Proxy
+
+TeleGO can run behind HAProxy or nginx using Unix sockets and PROXY protocol:
+
+**config.toml:**
+```toml
+bind-to = "/run/telego/telego.sock"
+proxy-protocol = true
+max-connections-per-ip = 10
+
+[secrets]
+user1 = "..."
+
+[tls-fronting]
+mask-host = "www.google.com"
+```
+
+**HAProxy example:**
+```
+backend telego
+    mode tcp
+    server telego /run/telego/telego.sock send-proxy-v2
+```
+
+**nginx example:**
+```nginx
+upstream telego {
+    server unix:/run/telego/telego.sock;
+}
+
+server {
+    listen 443;
+    proxy_pass telego;
+    proxy_protocol on;
+}
+```
+
+---
+
 ## Systemd
 
 Install as a systemd service:
@@ -224,11 +281,31 @@ Tested on Intel i9-12900K, Linux 6.6:
 
 ### Optimizations
 
-- **Striped locking** — 32-shard replay cache reduces lock contention
-- **Buffer pools** — 768KB DC buffers, 256KB read buffers, 16KB crypto buffers
+- **Striped locking** — 32-shard replay cache, 64-shard connection limiter
+- **Buffer pools** — 768KB DC buffers, 256KB read buffers, pooled blake3 hashers
 - **Zero-copy crypto** — XORKeyStream directly into output buffers
 - **Batched writes** — Multiple TLS records coalesced into single syscall
 - **Lock-free state** — Atomic state machine for connection handling
+
+---
+
+## Logging
+
+Connections are tracked with unique IDs for easy correlation:
+
+```
+INF gnet proxy started on 0.0.0.0:443
+INF Connection limiter enabled: max 10 per IP+secret
+INF [#1:alice] 203.0.113.5:54321 -> DC 2
+INF [#2:bob] 198.51.100.10:12345 -> DC 4
+INF [#1:alice] closed (45.2s)
+WRN [#2:bob] closed (30s): i/o timeout
+```
+
+- `#N` — Connection ID (incremental, unique per session)
+- `#N:user` — Connection ID with matched secret name
+- Duration shown on close
+- Errors on authenticated connections logged as WARN
 
 ---
 

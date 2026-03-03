@@ -140,7 +140,7 @@ func TestParseClientFrame_CipherSymmetry(t *testing.T) {
 func TestGenerateServerFrame_Randomness(t *testing.T) {
 	seen := make(map[string]bool)
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		frameBytes, _, _, err := GenerateServerFrame(2)
 		if err != nil {
 			t.Fatalf("GenerateServerFrame failed: %v", err)
@@ -165,7 +165,7 @@ func TestGenerateServerFrame_AvoidReserved(t *testing.T) {
 	}
 
 	// Test the internal function that generates the frame before encryption
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		frame := generateServerFrame(2)
 
 		// Check first byte isn't 0xef
@@ -305,14 +305,14 @@ func TestDeriveKey_DifferentInputs(t *testing.T) {
 // TestReverseKeyIV tests 48-byte reversal is correct.
 func TestReverseKeyIV(t *testing.T) {
 	input := make([]byte, 48)
-	for i := 0; i < 48; i++ {
+	for i := range 48 {
 		input[i] = byte(i)
 	}
 
 	result := reverseKeyIV(input)
 
 	// Verify reversal
-	for i := 0; i < 48; i++ {
+	for i := range 48 {
 		expected := byte(47 - i)
 		if result[i] != expected {
 			t.Errorf("reverseKeyIV[%d]: got %d, want %d", i, result[i], expected)

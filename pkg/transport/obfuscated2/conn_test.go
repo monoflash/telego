@@ -68,7 +68,7 @@ func TestConn_ReadWrite(t *testing.T) {
 		done <- err
 	}()
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := <-done; err != nil {
 			t.Errorf("Error: %v", err)
 		}
@@ -111,7 +111,7 @@ func TestConn_LargeWrite(t *testing.T) {
 		done <- err
 	}()
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := <-done; err != nil {
 			t.Errorf("Error: %v", err)
 		}
@@ -227,7 +227,7 @@ func TestConn_ConcurrentWrites(t *testing.T) {
 	}()
 
 	// Concurrent writers
-	for i := 0; i < numWriters; i++ {
+	for range numWriters {
 		go func() {
 			defer wg.Done()
 			data := make([]byte, writeSize)
@@ -347,7 +347,7 @@ func TestConn_SmallReads(t *testing.T) {
 	}()
 
 	// Read one byte at a time
-	for i := 0; i < len(testData); i++ {
+	for i := range testData {
 		buf := make([]byte, 1)
 		_, err := clientConn.Read(buf)
 		if err != nil {

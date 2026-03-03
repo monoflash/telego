@@ -241,7 +241,7 @@ func TestGenerateKey(t *testing.T) {
 func TestGenerateKey_Randomness(t *testing.T) {
 	seen := make(map[string]bool)
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		key, err := GenerateKey()
 		if err != nil {
 			t.Fatalf("GenerateKey failed: %v", err)

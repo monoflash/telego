@@ -92,7 +92,7 @@ func deriveKey(secret, handshakeKey []byte) []byte {
 // reverseKeyIV reverses a 48-byte key+IV block into a stack-allocated array.
 func reverseKeyIV(b []byte) [48]byte {
 	var result [48]byte
-	for i := 0; i < 48; i++ {
+	for i := range 48 {
 		result[47-i] = b[i]
 	}
 	return result

@@ -127,7 +127,7 @@ func TestConnContext_ConcurrentState(t *testing.T) {
 	wg.Add(numGoroutines * 2)
 
 	// Writers
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
 			states := []ConnState{
@@ -136,17 +136,17 @@ func TestConnContext_ConcurrentState(t *testing.T) {
 				StateReadO2Frame,
 				StateDialingDC,
 			}
-			for j := 0; j < 100; j++ {
+			for j := range 100 {
 				ctx.SetState(states[j%len(states)])
 			}
 		}(i)
 	}
 
 	// Readers
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		go func() {
 			defer wg.Done()
-			for j := 0; j < 100; j++ {
+			for range 100 {
 				state := ctx.State()
 				// Just verify it's a valid state
 				_ = state.String()
@@ -165,19 +165,17 @@ func TestConnContext_ConcurrentRelay(t *testing.T) {
 	const numReaders = 100
 
 	// Set relay in one goroutine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		relay := &RelayContext{}
 		ctx.SetRelay(relay)
-	}()
+	})
 
 	// Read relay in many goroutines
 	wg.Add(numReaders)
-	for i := 0; i < numReaders; i++ {
+	for range numReaders {
 		go func() {
 			defer wg.Done()
-			for j := 0; j < 100; j++ {
+			for range 100 {
 				_ = ctx.Relay()
 			}
 		}()
