@@ -2,6 +2,7 @@ package gproxy
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"time"
 
@@ -75,10 +76,12 @@ func (h *ProxyHandler) handleTLSPayload(c gnet.Conn, ctx *ConnContext) gnet.Acti
 		s := &h.config.Secrets[i]
 		parsed, err := faketls.ParseClientHello(s.Key, payload)
 		if err != nil {
+			h.logger.Debug("[#%d] secret %q parse failed: %v", ctx.id, s.Name, err)
 			continue
 		}
 		// Validate against this secret's hostname
 		if err := parsed.Valid(s.Host, h.config.TimeSkewTolerance); err != nil {
+			h.logger.Debug("[#%d] secret %q validation failed: %v (SNI=%q, expected=%q)", ctx.id, s.Name, err, parsed.Host, s.Host)
 			continue
 		}
 		hello = parsed
@@ -87,7 +90,12 @@ func (h *ProxyHandler) handleTLSPayload(c gnet.Conn, ctx *ConnContext) gnet.Acti
 	}
 
 	if hello == nil {
-		h.logger.Debug("[#%d] no matching secret found", ctx.id)
+		// Log diagnostic info to help troubleshoot
+		hexDump := ""
+		for i := 0; i < 20 && i < len(payload); i++ {
+			hexDump += fmt.Sprintf("%02x ", payload[i])
+		}
+		h.logger.Debug("[#%d] no matching secret found (payload len=%d, first bytes: %s)", ctx.id, len(payload), hexDump)
 		return h.startSplice(c, ctx)
 	}
 
