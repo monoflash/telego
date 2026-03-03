@@ -91,6 +91,7 @@ telego generate www.google.com
 **2. Create `config.toml`:**
 
 ```toml
+[general]
 bind-to = "0.0.0.0:443"
 
 [secrets]
@@ -116,6 +117,7 @@ The `-l` flag prints Telegram proxy links with auto-detected public IP.
 ### Config Reference
 
 ```toml
+[general]
 # Network binding (TCP or Unix socket)
 bind-to = "0.0.0.0:443"
 # bind-to = "/run/telego/telego.sock"  # Unix socket
@@ -217,6 +219,7 @@ TeleGO can run behind HAProxy or nginx using Unix sockets and PROXY protocol:
 
 **config.toml:**
 ```toml
+[general]
 bind-to = "/run/telego/telego.sock"
 proxy-protocol = true
 max-connections-per-ip = 10
