@@ -60,7 +60,8 @@ func (l *ConnLimiter) TryAcquire(ip net.IP, secret []byte) (key string, ok bool)
 	h.Reset()
 	h.Write(ip)
 	h.Write(secret)
-	h.Sum(keyArr[:0])
+	hash := h.Sum(nil)
+	copy(keyArr[:], hash[:limiterKeySize])
 	hasherPool.Put(h)
 
 	// Select shard based on first byte of key

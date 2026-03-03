@@ -173,8 +173,27 @@ func (h *ProxyHandler) OnTraffic(c gnet.Conn) gnet.Action {
 // handleProxyProto parses incoming PROXY protocol header.
 func (h *ProxyHandler) handleProxyProto(c gnet.Conn, ctx *ConnContext) gnet.Action {
 	data, _ := c.Peek(-1)
-	if len(data) < 8 {
-		return gnet.None // Need more data
+	if len(data) == 0 {
+		return gnet.None // Need data
+	}
+
+	// Quick check: if first byte can't start a PROXY header, skip to TLS immediately
+	// This prevents slowloris-style attacks with tiny payloads
+	// PROXY v1 starts with 'P' (0x50), v2 starts with 0x0D
+	if data[0] != 'P' && data[0] != 0x0D {
+		ctx.SetState(StateReadTLSHeader)
+		return h.handleTLSHeader(c, ctx)
+	}
+
+	// Need minimum bytes to determine protocol type
+	// v1: need 6 bytes for "PROXY " prefix
+	// v2: need 12 bytes for signature
+	minBytes := 6
+	if data[0] == 0x0D {
+		minBytes = 12
+	}
+	if len(data) < minBytes {
+		return gnet.None // Need more data to determine
 	}
 
 	result, err := ParseProxyProtocol(data)
