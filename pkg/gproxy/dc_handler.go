@@ -229,9 +229,11 @@ func (h *ProxyHandler) dialSplice(clientConn gnet.Conn, ctx *ConnContext) {
 
 	// Send PROXY protocol header if configured
 	if h.config.SpliceProxyProtocol > 0 {
+		// Use real client address from PROXY protocol if available
+		srcAddr := ctx.RealClientAddr(clientConn.RemoteAddr())
 		header := buildProxyProtocolHeader(
 			h.config.SpliceProxyProtocol,
-			clientConn.RemoteAddr(),
+			srcAddr,
 			clientConn.LocalAddr(),
 		)
 		if header != nil {

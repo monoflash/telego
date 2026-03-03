@@ -256,25 +256,28 @@ func TestConnContext_PendingData(t *testing.T) {
 // TestConnState_Values tests state constant values.
 func TestConnState_Values(t *testing.T) {
 	// States should be sequential from 0
-	if StateReadTLSHeader != 0 {
-		t.Errorf("StateReadTLSHeader should be 0, got %d", StateReadTLSHeader)
+	if StateReadProxyProto != 0 {
+		t.Errorf("StateReadProxyProto should be 0, got %d", StateReadProxyProto)
 	}
-	if StateReadTLSPayload != 1 {
-		t.Errorf("StateReadTLSPayload should be 1, got %d", StateReadTLSPayload)
+	if StateReadTLSHeader != 1 {
+		t.Errorf("StateReadTLSHeader should be 1, got %d", StateReadTLSHeader)
 	}
-	if StateReadO2Frame != 2 {
-		t.Errorf("StateReadO2Frame should be 2, got %d", StateReadO2Frame)
+	if StateReadTLSPayload != 2 {
+		t.Errorf("StateReadTLSPayload should be 2, got %d", StateReadTLSPayload)
 	}
-	if StateDialingDC != 3 {
-		t.Errorf("StateDialingDC should be 3, got %d", StateDialingDC)
+	if StateReadO2Frame != 3 {
+		t.Errorf("StateReadO2Frame should be 3, got %d", StateReadO2Frame)
 	}
-	if StateRelaying != 4 {
-		t.Errorf("StateRelaying should be 4, got %d", StateRelaying)
+	if StateDialingDC != 4 {
+		t.Errorf("StateDialingDC should be 4, got %d", StateDialingDC)
 	}
-	if StateSplicing != 5 {
-		t.Errorf("StateSplicing should be 5, got %d", StateSplicing)
+	if StateRelaying != 5 {
+		t.Errorf("StateRelaying should be 5, got %d", StateRelaying)
 	}
-	if StateClosed != 6 {
-		t.Errorf("StateClosed should be 6, got %d", StateClosed)
+	if StateSplicing != 6 {
+		t.Errorf("StateSplicing should be 6, got %d", StateSplicing)
+	}
+	if StateClosed != 7 {
+		t.Errorf("StateClosed should be 7, got %d", StateClosed)
 	}
 }

@@ -17,7 +17,8 @@ import (
 type ConnState int32
 
 const (
-	StateReadTLSHeader  ConnState = iota // Need 5 bytes for TLS record header
+	StateReadProxyProto ConnState = iota // Need PROXY protocol header (optional)
+	StateReadTLSHeader                   // Need 5 bytes for TLS record header
 	StateReadTLSPayload                  // Need header.length bytes for payload
 	StateReadO2Frame                     // Need 64 bytes for obfuscated2 frame
 	StateDialingDC                       // Async dial in progress
@@ -29,6 +30,8 @@ const (
 // String returns the state name for debugging.
 func (s ConnState) String() string {
 	switch s {
+	case StateReadProxyProto:
+		return "ReadProxyProto"
 	case StateReadTLSHeader:
 		return "ReadTLSHeader"
 	case StateReadTLSPayload:
@@ -93,6 +96,14 @@ type ConnContext struct {
 	// After set, read without locking
 	spliceConn atomic.Pointer[net.Conn]
 
+	// Real client address from PROXY protocol (if parsed)
+	// Protected by mu during handshake, immutable after
+	realClientAddr net.Addr
+
+	// Connection limit tracking (protected by mu)
+	limitTracked bool   // Whether this connection is tracked in limiter
+	limitKey     string // Cached key for limiter release
+
 	// Timing
 	connTime time.Time
 }
@@ -138,4 +149,22 @@ func (c *ConnContext) SpliceConn() net.Conn {
 // SetSpliceConn sets the splice connection.
 func (c *ConnContext) SetSpliceConn(conn net.Conn) {
 	c.spliceConn.Store(&conn)
+}
+
+// RealClientAddr returns the real client address from PROXY protocol.
+// Falls back to the provided gnet connection's remote address if not set.
+func (c *ConnContext) RealClientAddr(fallback net.Addr) net.Addr {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.realClientAddr != nil {
+		return c.realClientAddr
+	}
+	return fallback
+}
+
+// SetRealClientAddr sets the real client address from PROXY protocol.
+func (c *ConnContext) SetRealClientAddr(addr net.Addr) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.realClientAddr = addr
 }

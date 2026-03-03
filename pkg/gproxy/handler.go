@@ -24,6 +24,9 @@ type ProxyHandler struct {
 	// Replay cache for anti-replay protection
 	replayCache *ReplayCache
 
+	// Connection limiter (nil if disabled)
+	connLimiter *ConnLimiter
+
 	// TLS fronting
 	certFetcher *tlsfront.CertFetcher
 
@@ -40,11 +43,19 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 		logger = defaultLogger{}
 	}
 
-	return &ProxyHandler{
+	h := &ProxyHandler{
 		config:      cfg,
 		replayCache: NewReplayCache(1000000, 10*time.Minute),
 		logger:      logger,
 	}
+
+	// Initialize connection limiter if configured
+	if cfg.MaxConnectionsPerIP > 0 {
+		h.connLimiter = NewConnLimiter(cfg.MaxConnectionsPerIP)
+		logger.Info("Connection limiter enabled: max %d per IP+secret", cfg.MaxConnectionsPerIP)
+	}
+
+	return h
 }
 
 // OnBoot is called when the gnet engine starts.
@@ -64,6 +75,12 @@ func (h *ProxyHandler) OnShutdown(eng gnet.Engine) {
 // OnOpen is called when a new connection is accepted.
 func (h *ProxyHandler) OnOpen(c gnet.Conn) ([]byte, gnet.Action) {
 	ctx := NewConnContext()
+
+	// Start with PROXY protocol parsing if enabled
+	if h.config.ProxyProtocol {
+		ctx.SetState(StateReadProxyProto)
+	}
+
 	c.SetContext(ctx)
 
 	h.logger.Debug("new connection from %s", c.RemoteAddr())
@@ -91,13 +108,19 @@ func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 		spliceConn.Close()
 	}
 
+	// Release connection limit slot
+	ctx.mu.Lock()
+	userName := ""
+	if ctx.secret != nil {
+		userName = ctx.secret.Name
+	}
+	if ctx.limitTracked && h.connLimiter != nil {
+		h.connLimiter.Release(ctx.limitKey)
+		ctx.limitTracked = false
+	}
+	ctx.mu.Unlock()
+
 	if err != nil {
-		ctx.mu.Lock()
-		userName := ""
-		if ctx.secret != nil {
-			userName = ctx.secret.Name
-		}
-		ctx.mu.Unlock()
 		if userName != "" {
 			h.logger.Debug("[%s] closed: %v", userName, err)
 		} else {
@@ -117,6 +140,8 @@ func (h *ProxyHandler) OnTraffic(c gnet.Conn) gnet.Action {
 
 	// Lock-free state read
 	switch ctx.State() {
+	case StateReadProxyProto:
+		return h.handleProxyProto(c, ctx)
 	case StateReadTLSHeader:
 		return h.handleTLSHeader(c, ctx)
 	case StateReadTLSPayload:
@@ -135,6 +160,39 @@ func (h *ProxyHandler) OnTraffic(c gnet.Conn) gnet.Action {
 	}
 
 	return gnet.Close
+}
+
+// handleProxyProto parses incoming PROXY protocol header.
+func (h *ProxyHandler) handleProxyProto(c gnet.Conn, ctx *ConnContext) gnet.Action {
+	data, _ := c.Peek(-1)
+	if len(data) < 8 {
+		return gnet.None // Need more data
+	}
+
+	result, err := ParseProxyProtocol(data)
+	if err != nil {
+		h.logger.Debug("PROXY protocol error: %v", err)
+		return gnet.Close
+	}
+
+	if result == nil {
+		// Not a PROXY protocol header, proceed to TLS
+		ctx.SetState(StateReadTLSHeader)
+		return h.handleTLSHeader(c, ctx)
+	}
+
+	// Discard the PROXY header bytes
+	c.Discard(result.HeaderLen)
+
+	// Store real client address if provided
+	if result.SrcAddr != nil {
+		ctx.SetRealClientAddr(result.SrcAddr)
+		h.logger.Debug("PROXY protocol: real client %s", result.SrcAddr)
+	}
+
+	// Proceed to TLS handshake
+	ctx.SetState(StateReadTLSHeader)
+	return h.handleTLSHeader(c, ctx)
 }
 
 // Logger interface for proxy logging.

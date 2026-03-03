@@ -470,3 +470,106 @@ func TestDuration_Duration(t *testing.T) {
 		t.Errorf("Duration(): got %v, want 5m", d.Duration())
 	}
 }
+
+// TestLoad_GeneralSection tests the new [general] section.
+func TestLoad_GeneralSection(t *testing.T) {
+	content := `
+[general]
+bind-to = "0.0.0.0:8443"
+log-level = "debug"
+proxy-protocol = true
+max-connections-per-ip = 10
+
+[secrets]
+main = "0123456789abcdef0123456789abcdef"
+
+[tls-fronting]
+mask-host = "www.google.com"
+`
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if cfg.General.BindTo != "0.0.0.0:8443" {
+		t.Errorf("General.BindTo: got %q, want %q", cfg.General.BindTo, "0.0.0.0:8443")
+	}
+
+	if cfg.General.LogLevel != "debug" {
+		t.Errorf("General.LogLevel: got %q, want %q", cfg.General.LogLevel, "debug")
+	}
+
+	if !cfg.General.ProxyProtocol {
+		t.Error("General.ProxyProtocol should be true")
+	}
+
+	if cfg.General.MaxConnectionsPerIP != 10 {
+		t.Errorf("General.MaxConnectionsPerIP: got %d, want 10", cfg.General.MaxConnectionsPerIP)
+	}
+
+	// Test ToGProxyConfig uses [general] values
+	gCfg, err := cfg.ToGProxyConfig()
+	if err != nil {
+		t.Fatalf("ToGProxyConfig failed: %v", err)
+	}
+
+	if gCfg.BindAddr != "0.0.0.0:8443" {
+		t.Errorf("gCfg.BindAddr: got %q, want %q", gCfg.BindAddr, "0.0.0.0:8443")
+	}
+
+	if !gCfg.ProxyProtocol {
+		t.Error("gCfg.ProxyProtocol should be true")
+	}
+
+	if gCfg.MaxConnectionsPerIP != 10 {
+		t.Errorf("gCfg.MaxConnectionsPerIP: got %d, want 10", gCfg.MaxConnectionsPerIP)
+	}
+}
+
+// TestLoad_GeneralSectionPrecedence tests [general] takes precedence over top-level.
+func TestLoad_GeneralSectionPrecedence(t *testing.T) {
+	content := `
+# Top-level (deprecated)
+bind-to = "0.0.0.0:443"
+log-level = "info"
+
+# Should override top-level
+[general]
+bind-to = "0.0.0.0:8443"
+log-level = "debug"
+
+[secrets]
+main = "0123456789abcdef0123456789abcdef"
+
+[tls-fronting]
+mask-host = "www.google.com"
+`
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	gCfg, err := cfg.ToGProxyConfig()
+	if err != nil {
+		t.Fatalf("ToGProxyConfig failed: %v", err)
+	}
+
+	// [general] should take precedence
+	if gCfg.BindAddr != "0.0.0.0:8443" {
+		t.Errorf("gCfg.BindAddr: got %q, want %q (from [general])", gCfg.BindAddr, "0.0.0.0:8443")
+	}
+}

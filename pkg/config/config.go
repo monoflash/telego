@@ -18,13 +18,24 @@ import (
 
 // Config is the TOML configuration structure.
 type Config struct {
-	Secrets  map[string]string `toml:"secrets"` // name = "secret"
-	BindTo   string            `toml:"bind-to"`
-	LogLevel string            `toml:"log-level"` // trace, debug, info, warn, error
+	// Top-level options (deprecated, use [general] section)
+	BindTo   string `toml:"bind-to"`
+	LogLevel string `toml:"log-level"`
 
+	Secrets map[string]string `toml:"secrets"` // name = "secret"
+
+	General     GeneralConfig     `toml:"general"`
 	TLSFronting TLSFrontingConfig `toml:"tls-fronting"`
 	Performance PerformanceConfig `toml:"performance"`
 	Upstream    UpstreamConfig    `toml:"upstream"`
+}
+
+// GeneralConfig contains general server settings.
+type GeneralConfig struct {
+	BindTo              string `toml:"bind-to"`
+	LogLevel            string `toml:"log-level"`              // trace, debug, info, warn, error
+	ProxyProtocol       bool   `toml:"proxy-protocol"`         // Accept incoming PROXY protocol
+	MaxConnectionsPerIP int    `toml:"max-connections-per-ip"` // Per IP+secret, 0 = unlimited
 }
 
 // TLSFrontingConfig configures TLS fronting.
@@ -92,7 +103,12 @@ func Load(path string) (*Config, error) {
 // ToGProxyConfig converts to gproxy.Config.
 func (c *Config) ToGProxyConfig() (gproxy.Config, error) {
 	cfg := gproxy.DefaultConfig()
-	cfg.BindAddr = c.BindTo
+
+	// Bind address: [general] takes precedence over top-level (backwards compat)
+	cfg.BindAddr = c.General.BindTo
+	if cfg.BindAddr == "" {
+		cfg.BindAddr = c.BindTo
+	}
 
 	// Parse secrets
 	if len(c.Secrets) == 0 {
@@ -175,6 +191,10 @@ func (c *Config) ToGProxyConfig() (gproxy.Config, error) {
 
 	// Upstream settings
 	cfg.Socks5Addr = c.Upstream.Socks5
+
+	// General settings
+	cfg.ProxyProtocol = c.General.ProxyProtocol
+	cfg.MaxConnectionsPerIP = c.General.MaxConnectionsPerIP
 
 	return cfg, nil
 }

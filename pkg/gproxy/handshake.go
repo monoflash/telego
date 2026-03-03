@@ -2,6 +2,7 @@ package gproxy
 
 import (
 	"encoding/binary"
+	"net"
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
@@ -104,6 +105,30 @@ func (h *ProxyHandler) handleTLSPayload(c gnet.Conn, ctx *ConnContext) gnet.Acti
 	ctx.clientHello = hello
 	ctx.secret = matchedSecret
 	ctx.mu.Unlock()
+
+	// Check connection limit (if enabled)
+	if h.connLimiter != nil {
+		clientAddr := ctx.RealClientAddr(c.RemoteAddr())
+		var clientIP net.IP
+		if tcpAddr, ok := clientAddr.(*net.TCPAddr); ok {
+			clientIP = tcpAddr.IP
+		} else if host, _, err := net.SplitHostPort(clientAddr.String()); err == nil {
+			clientIP = net.ParseIP(host)
+		}
+
+		if clientIP != nil {
+			key, ok := h.connLimiter.TryAcquire(clientIP, matchedSecret.Key)
+			if !ok {
+				h.logger.Debug("[%s] connection limit exceeded for %s", matchedSecret.Name, clientIP)
+				return gnet.Close
+			}
+			// Store tracking info for cleanup in OnClose
+			ctx.mu.Lock()
+			ctx.limitTracked = true
+			ctx.limitKey = key
+			ctx.mu.Unlock()
+		}
+	}
 
 	h.logger.Debug("client matched secret %q", matchedSecret.Name)
 

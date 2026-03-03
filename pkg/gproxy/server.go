@@ -3,6 +3,8 @@ package gproxy
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -55,6 +57,10 @@ type Config struct {
 	// Upstream (DC connection)
 	Socks5Addr string // SOCKS5 proxy for DC connections (e.g., "127.0.0.1:1080")
 
+	// Incoming connection handling
+	ProxyProtocol       bool // Accept incoming PROXY protocol headers
+	MaxConnectionsPerIP int  // Per IP+secret limit, 0 = unlimited
+
 	// gnet-specific
 	Multicore    bool // Use multiple event loops
 	ReusePort    bool // Enable SO_REUSEPORT
@@ -74,6 +80,28 @@ func DefaultConfig() Config {
 		ReusePort:         true,
 		LockOSThread:      true,
 	}
+}
+
+// parseBindAddress parses the bind address and returns the gnet address string.
+// Returns the gnet-formatted address and whether it's a Unix socket.
+func parseBindAddress(addr string) (gnetAddr string, isUnix bool) {
+	if strings.HasPrefix(addr, "unix://") {
+		return addr, true
+	}
+	if strings.HasPrefix(addr, "tcp://") {
+		return addr, false
+	}
+	// Auto-detect: paths starting with "/" are Unix sockets
+	if strings.HasPrefix(addr, "/") {
+		return "unix://" + addr, true
+	}
+	return "tcp://" + addr, false
+}
+
+// IsUnixSocket returns true if the bind address is a Unix socket.
+func IsUnixSocket(addr string) bool {
+	_, isUnix := parseBindAddress(addr)
+	return isUnix
 }
 
 // Run starts the proxy with graceful shutdown support using gnet.
@@ -162,7 +190,15 @@ func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
 			opts = append(opts, gnet.WithNumEventLoop(cfg.NumEventLoop))
 		}
 
-		addr := "tcp://" + cfg.BindAddr
+		addr, isUnix := parseBindAddress(cfg.BindAddr)
+
+		// Clean up existing socket file before binding
+		if isUnix {
+			socketPath := strings.TrimPrefix(addr, "unix://")
+			if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+				logger.Warn("Failed to remove existing socket file %s: %v", socketPath, err)
+			}
+		}
 
 		logger.Info("Starting gnet proxy on %s (multicore=%v, reuseport=%v)",
 			cfg.BindAddr, cfg.Multicore, cfg.ReusePort)

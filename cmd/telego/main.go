@@ -45,9 +45,13 @@ func (c *RunCmd) Run() error {
 		return err
 	}
 
-	// Set log level from config
-	if fileCfg.LogLevel != "" {
-		log.SetLevel(fileCfg.LogLevel)
+	// Set log level from config ([general] takes precedence)
+	logLevel := fileCfg.General.LogLevel
+	if logLevel == "" {
+		logLevel = fileCfg.LogLevel // backwards compat
+	}
+	if logLevel != "" {
+		log.SetLevel(logLevel)
 	}
 
 	// CLI overrides
@@ -60,9 +64,11 @@ func (c *RunCmd) Run() error {
 		cfg.BindAddr = "0.0.0.0:443"
 	}
 
-	// Print Telegram links if requested
+	// Print Telegram links if requested (skip for Unix sockets)
 	if c.Link {
-		if err := printTelegramLinks(cfg.Secrets, cfg.BindAddr); err != nil {
+		if gproxy.IsUnixSocket(cfg.BindAddr) {
+			log.Warn().Msg("Telegram links not available for Unix socket binding")
+		} else if err := printTelegramLinks(cfg.Secrets, cfg.BindAddr); err != nil {
 			log.Warn().Err(err).Msg("failed to generate Telegram links")
 		}
 	}
