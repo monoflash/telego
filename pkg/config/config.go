@@ -18,9 +18,11 @@ import (
 
 // Config is the TOML configuration structure.
 type Config struct {
-	// Top-level options (deprecated, use [general] section)
-	BindTo   string `toml:"bind-to"`
-	LogLevel string `toml:"log-level"`
+	// Top-level options (can also be set in [general] section)
+	BindTo              string `toml:"bind-to"`
+	LogLevel            string `toml:"log-level"`
+	ProxyProtocol       bool   `toml:"proxy-protocol"`
+	MaxConnectionsPerIP int    `toml:"max-connections-per-ip"`
 
 	Secrets map[string]string `toml:"secrets"` // name = "secret"
 
@@ -192,9 +194,12 @@ func (c *Config) ToGProxyConfig() (gproxy.Config, error) {
 	// Upstream settings
 	cfg.Socks5Addr = c.Upstream.Socks5
 
-	// General settings
-	cfg.ProxyProtocol = c.General.ProxyProtocol
+	// General settings ([general] takes precedence over top-level)
+	cfg.ProxyProtocol = c.General.ProxyProtocol || c.ProxyProtocol
 	cfg.MaxConnectionsPerIP = c.General.MaxConnectionsPerIP
+	if cfg.MaxConnectionsPerIP == 0 {
+		cfg.MaxConnectionsPerIP = c.MaxConnectionsPerIP
+	}
 
 	return cfg, nil
 }

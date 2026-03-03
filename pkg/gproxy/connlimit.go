@@ -18,6 +18,11 @@ const (
 	limiterKeySize = 8
 )
 
+// Pool of blake3 hashers to avoid allocation per TryAcquire
+var hasherPool = sync.Pool{
+	New: func() any { return blake3.New() },
+}
+
 // ConnLimiter limits concurrent connections per IP+secret combination.
 // Uses sharded maps and atomic counters for minimal contention.
 type ConnLimiter struct {
@@ -51,10 +56,12 @@ func (l *ConnLimiter) TryAcquire(ip net.IP, secret []byte) (key string, ok bool)
 	// Compute key: blake3(ip || secret), truncated to limiterKeySize bytes
 	// Blake3 is ~3x faster than SHA256 and highly optimized
 	var keyArr [limiterKeySize]byte
-	h := blake3.New()
+	h := hasherPool.Get().(*blake3.Hasher)
+	h.Reset()
 	h.Write(ip)
 	h.Write(secret)
 	h.Sum(keyArr[:0])
+	hasherPool.Put(h)
 
 	// Select shard based on first byte of key
 	shardIdx := int(keyArr[0]) & limiterShardMask

@@ -151,8 +151,11 @@ func parseProxyProtoV2(data []byte) (*ProxyProtoResult, error) {
 		if len(addrData) < 12 {
 			return nil, fmt.Errorf("proxy protocol v2: IPv4 address data too short")
 		}
-		srcIP := net.IP(addrData[0:4])
-		dstIP := net.IP(addrData[4:8])
+		// Copy IPs to avoid referencing the input buffer (which may be reused)
+		srcIP := make(net.IP, 4)
+		dstIP := make(net.IP, 4)
+		copy(srcIP, addrData[0:4])
+		copy(dstIP, addrData[4:8])
 		srcPort := binary.BigEndian.Uint16(addrData[8:10])
 		dstPort := binary.BigEndian.Uint16(addrData[10:12])
 
@@ -163,8 +166,11 @@ func parseProxyProtoV2(data []byte) (*ProxyProtoResult, error) {
 		if len(addrData) < 36 {
 			return nil, fmt.Errorf("proxy protocol v2: IPv6 address data too short")
 		}
-		srcIP := net.IP(addrData[0:16])
-		dstIP := net.IP(addrData[16:32])
+		// Copy IPs to avoid referencing the input buffer (which may be reused)
+		srcIP := make(net.IP, 16)
+		dstIP := make(net.IP, 16)
+		copy(srcIP, addrData[0:16])
+		copy(dstIP, addrData[16:32])
 		srcPort := binary.BigEndian.Uint16(addrData[32:34])
 		dstPort := binary.BigEndian.Uint16(addrData[34:36])
 
