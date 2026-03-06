@@ -2,7 +2,7 @@
   <img src="docs/logo.jpg" alt="TeleGO Logo" width="200">
 </p>
 
-<h1 align="center">TeleGO</h1>
+<h1 align="center">TeleGO</h1> <!-- Название проекта читается "ТелЕго", см https://ru.wikipedia.org/wiki/%D0%96%D0%B0%D1%80%D0%B3%D0%BE%D0%BD_%D0%BF%D0%B0%D0%B4%D0%BE%D0%BD%D0%BA%D0%BE%D0%B2 -->
 
 <p align="center">
   <strong>High-performance Telegram MTProxy in Go with TLS fronting</strong>
@@ -355,7 +355,3 @@ This project was inspired by and builds upon ideas from:
 - **[telemt](https://github.com/nicksnet/telemt)** — High-performance Rust MTProxy implementation
 
 ---
-
-<p align="center">
-  Made with Go
-</p>
