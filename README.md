@@ -34,7 +34,7 @@
 - **Event-driven I/O** — Built on [gnet](https://github.com/panjf2000/gnet) with epoll/kqueue for maximum efficiency
 - **Zero-copy relaying** — Direct buffer manipulation without intermediate copies
 - **Buffer pooling** — Striped sync.Pool design eliminates allocations in hot paths
-- **Optimized TCP** — `TCP_NODELAY`, `TCP_QUICKACK`, 768KB buffers, `SO_REUSEPORT`
+- **Optimized TCP** — `TCP_NODELAY`, `TCP_QUICKACK`, 64KB buffers, `SO_REUSEPORT`
 
 ### Security
 - **TLS Fronting** — Fetches real certificates from mask host for perfect camouflage
@@ -285,7 +285,7 @@ Tested on Intel i9-12900K, Linux 6.6:
 ### Optimizations
 
 - **Striped locking** — 32-shard replay cache, 64-shard connection limiter
-- **Buffer pools** — 768KB DC buffers, 256KB read buffers, pooled blake3 hashers
+- **Buffer pools** — 64KB DC buffers, 64KB read buffers, pooled blake3 hashers
 - **Zero-copy crypto** — XORKeyStream directly into output buffers
 - **Batched writes** — Multiple TLS records coalesced into single syscall
 - **Lock-free state** — Atomic state machine for connection handling

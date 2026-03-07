@@ -3,6 +3,7 @@ package gproxy
 import (
 	"errors"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
@@ -85,7 +86,8 @@ func (h *ProxyHandler) OnOpen(c gnet.Conn) ([]byte, gnet.Action) {
 
 	c.SetContext(ctx)
 
-	h.logger.Debug("[#%d] new connection from %s", ctx.id, c.RemoteAddr())
+	conns := atomic.AddInt64(&h.activeConns, 1)
+	h.logger.Debug("[#%d] new connection from %s (active: %d)", ctx.id, c.RemoteAddr(), conns)
 
 	// Set read deadline for handshake
 	c.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -95,8 +97,11 @@ func (h *ProxyHandler) OnOpen(c gnet.Conn) ([]byte, gnet.Action) {
 
 // OnClose is called when a connection is closed.
 func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
+	conns := atomic.AddInt64(&h.activeConns, -1)
+
 	ctx, ok := c.Context().(*ConnContext)
 	if !ok || ctx == nil {
+		h.logger.Debug("[?] connection closed without context (active: %d)", conns)
 		return gnet.None
 	}
 
@@ -129,12 +134,12 @@ func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 
 	if authenticated {
 		if isRealError {
-			h.logger.Warn("[%s] DC %d closed (%v): %v", prefix, dcID, duration.Round(time.Millisecond), err)
+			h.logger.Warn("[%s] DC %d closed (%v): %v (active: %d)", prefix, dcID, duration.Round(time.Millisecond), err, conns)
 		} else {
-			h.logger.Info("[%s] DC %d closed (%v)", prefix, dcID, duration.Round(time.Millisecond))
+			h.logger.Info("[%s] DC %d closed (%v) (active: %d)", prefix, dcID, duration.Round(time.Millisecond), conns)
 		}
 	} else if isRealError {
-		h.logger.Debug("[%s] closed (%v): %v", prefix, duration.Round(time.Millisecond), err)
+		h.logger.Debug("[%s] closed (%v): %v (active: %d)", prefix, duration.Round(time.Millisecond), err, conns)
 	}
 
 	return gnet.None

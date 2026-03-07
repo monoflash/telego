@@ -9,8 +9,9 @@ import (
 	"github.com/scratch-net/telego/pkg/transport/faketls"
 )
 
-// Buffer size for optimal throughput - larger buffers reduce syscalls
-const relayBufSize = 768 * 1024 // 768KB for better batching
+// Buffer size for batching - balances throughput vs memory
+// 64KB allows batching 4 TLS records (16KB each) while limiting memory per connection
+const relayBufSize = 64 * 1024 // 64KB for batching
 
 // Buffer pools for relay operations to avoid allocations in hot path
 var (
@@ -22,12 +23,12 @@ var (
 		},
 	}
 
-	// dcBufPool for batching writes - 768KB for reduced syscalls
+	// dcBufPool for batching writes - 64KB for reduced syscalls
 	// Used for both Client->DC batching and DC->Client TLS wrapping
-	// Sized to hold 768KB data + TLS header overhead (5 bytes per 16KB = ~240 bytes)
+	// Sized to hold 64KB data + TLS header overhead (5 bytes per 16KB = ~20 bytes)
 	dcBufPool = sync.Pool{
 		New: func() any {
-			buf := make([]byte, relayBufSize+512)
+			buf := make([]byte, relayBufSize+256)
 			return &buf
 		},
 	}

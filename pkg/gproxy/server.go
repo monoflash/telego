@@ -138,8 +138,8 @@ func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
 			dcHandler,
 			gnet.WithMulticore(cfg.Multicore),
 			gnet.WithLockOSThread(cfg.LockOSThread),
-			gnet.WithReadBufferCap(256*1024),  // 256KB read buffer
-			gnet.WithWriteBufferCap(768*1024), // 768KB write buffer
+			gnet.WithReadBufferCap(64*1024),  // 64KB read buffer
+			gnet.WithWriteBufferCap(64*1024), // 64KB write buffer
 		)
 		if err != nil {
 			ch <- fmt.Errorf("failed to create DC client: %w", err)
