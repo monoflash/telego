@@ -196,3 +196,10 @@ func (c *ConnContext) SetRealClientAddr(addr net.Addr) {
 	defer c.mu.Unlock()
 	c.realClientAddr = addr
 }
+
+// DCID returns the DC ID this connection is using (0 if not yet determined).
+func (c *ConnContext) DCID() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dcID
+}

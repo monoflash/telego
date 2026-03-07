@@ -4,6 +4,8 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -71,6 +73,16 @@ func (c *RunCmd) Run() error {
 		} else if err := printTelegramLinks(cfg.Secrets, cfg.BindAddr); err != nil {
 			log.Warn().Err(err).Msg("failed to generate Telegram links")
 		}
+	}
+
+	// Start pprof server if configured (for memory debugging)
+	if fileCfg.Performance.PprofAddr != "" {
+		go func() {
+			log.Info().Str("addr", fileCfg.Performance.PprofAddr).Msg("pprof server started")
+			if err := http.ListenAndServe(fileCfg.Performance.PprofAddr, nil); err != nil {
+				log.Warn().Err(err).Msg("pprof server failed")
+			}
+		}()
 	}
 
 	log.Info().

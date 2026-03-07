@@ -64,6 +64,7 @@ type PerformanceConfig struct {
 	NumEventLoops int      `toml:"num-event-loops"` // gnet event loops (0 = auto, uses all cores)
 	PreferIP      string   `toml:"prefer-ip"`
 	IdleTimeout   Duration `toml:"idle-timeout"`
+	PprofAddr     string   `toml:"pprof-addr"` // e.g. "localhost:6060" for memory profiling
 }
 
 // UpstreamConfig configures upstream (DC) connection settings.

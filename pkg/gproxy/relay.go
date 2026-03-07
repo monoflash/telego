@@ -79,10 +79,16 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 			if batchOffset+len(payload) > len(batchBuf) {
 				// Flush current batch via async write
 				if batchOffset > 0 {
-					// Need a separate buffer for async write
-					flushBuf := make([]byte, batchOffset)
+					// Get pooled buffer for async write
+					flushBufPtr := dcBufPool.Get().(*[]byte)
+					flushBuf := (*flushBufPtr)[:batchOffset]
 					copy(flushBuf, batchBuf[:batchOffset])
-					if err := dcConn.AsyncWrite(flushBuf, nil); err != nil {
+					err := dcConn.AsyncWrite(flushBuf, func(c gnet.Conn, err error) error {
+						dcBufPool.Put(flushBufPtr)
+						return nil
+					})
+					if err != nil {
+						dcBufPool.Put(flushBufPtr)
 						dcBufPool.Put(batchBufPtr)
 						return gnet.Close
 					}

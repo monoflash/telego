@@ -128,16 +128,24 @@ func (h *ProxyHandler) dialDirectDC(dcID int) (*directDCConn, error) {
 
 	var conn netx.Conn
 	var err error
+	var usedAddr dc.Addr
+	dialStart := time.Now()
 	for _, addr := range addrs {
 		conn, err = dialFunc(addr.Network, addr.Address)
 		if err == nil {
+			usedAddr = addr
 			break
 		}
+		h.logger.Debug("DC %d dial failed: %s: %v", dcID, addr.Address, err)
 	}
+	dialDuration := time.Since(dialStart)
 
 	if err != nil {
+		h.logger.Warn("DC %d all addresses failed after %v", dcID, dialDuration)
 		return nil, err
 	}
+
+	h.logger.Debug("DC %d connected to %s in %v", dcID, usedAddr.Address, dialDuration)
 
 	// Tune the connection
 	if tcpConn, ok := conn.(*net.TCPConn); ok {

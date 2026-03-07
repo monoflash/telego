@@ -2,6 +2,9 @@ package gproxy
 
 import (
 	"crypto/cipher"
+	"errors"
+	"io"
+	"time"
 
 	"github.com/panjf2000/gnet/v2"
 
@@ -45,6 +48,21 @@ func (h *dcEventHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 	if !ok || ctx == nil {
 		return gnet.None
 	}
+
+	// Log DC disconnect with details for debugging
+	if ctx.ClientCtx != nil {
+		prefix := ctx.ClientCtx.LogPrefix()
+		dcID := ctx.ClientCtx.DCID()
+		duration := time.Since(ctx.ClientCtx.connTime)
+
+		isRealError := err != nil && !errors.Is(err, io.EOF)
+		if isRealError {
+			h.proxy.logger.Warn("[%s] DC %d disconnected (%v): %v", prefix, dcID, duration.Round(time.Millisecond), err)
+		} else {
+			h.proxy.logger.Debug("[%s] DC %d disconnected (%v)", prefix, dcID, duration.Round(time.Millisecond))
+		}
+	}
+
 	if ctx.ClientConn != nil {
 		ctx.ClientConn.Close()
 	}

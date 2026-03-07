@@ -119,18 +119,19 @@ func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 	}
 	ctx.mu.Unlock()
 
-	// Log closure
+	// Log closure with DC info for debugging
 	duration := time.Since(ctx.connTime)
 	prefix := ctx.LogPrefix()
+	dcID := ctx.DCID()
 
 	// Determine if this is a real error (not just EOF/normal close)
 	isRealError := err != nil && !errors.Is(err, io.EOF)
 
 	if authenticated {
 		if isRealError {
-			h.logger.Warn("[%s] closed (%v): %v", prefix, duration.Round(time.Millisecond), err)
+			h.logger.Warn("[%s] DC %d closed (%v): %v", prefix, dcID, duration.Round(time.Millisecond), err)
 		} else {
-			h.logger.Info("[%s] closed (%v)", prefix, duration.Round(time.Millisecond))
+			h.logger.Info("[%s] DC %d closed (%v)", prefix, dcID, duration.Round(time.Millisecond))
 		}
 	} else if isRealError {
 		h.logger.Debug("[%s] closed (%v): %v", prefix, duration.Round(time.Millisecond), err)
