@@ -63,6 +63,11 @@ idle-timeout = "5m"
 # Number of event loops (0 = auto, uses all CPU cores)
 num-event-loops = 0
 
+# Max pending write bytes per connection before closing slow client (MB)
+# Prevents memory exhaustion when clients are slow to receive data
+# 0 = 4MB default, which allows ~4MB buffered data per connection
+# max-write-buffer-mb = 4
+
 # Upstream (DC connection) settings
 [upstream]
 # SOCKS5 proxy for Telegram DC connections

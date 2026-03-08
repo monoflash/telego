@@ -61,6 +61,9 @@ type Config struct {
 	ProxyProtocol       bool // Accept incoming PROXY protocol headers
 	MaxConnectionsPerIP int  // Per IP+secret limit, 0 = unlimited
 
+	// Backpressure
+	MaxWriteBuffer int // Max pending bytes per connection before closing (0 = 4MB default)
+
 	// gnet-specific
 	Multicore    bool // Use multiple event loops
 	ReusePort    bool // Enable SO_REUSEPORT

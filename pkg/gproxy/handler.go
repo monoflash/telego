@@ -11,6 +11,22 @@ import (
 	"github.com/scratch-net/telego/pkg/tlsfront"
 )
 
+// Buffer limits for flow control (follows Envoy's watermark pattern)
+const (
+	// Soft limit (high watermark): pause processing when buffer exceeds this
+	// This allows TCP backpressure to slow down sender without closing
+	defaultSoftLimit = 512 * 1024 // 512KB
+
+	// Resume threshold (low watermark): resume when buffer drops below this
+	// Set to 50% of soft limit to prevent rapid pause/resume thrashing
+	// (Envoy uses same 50% ratio)
+	defaultResumeThreshold = 256 * 1024 // 256KB
+
+	// Hard limit: close connection when buffers exceed this
+	// This is the last resort to prevent memory exhaustion
+	defaultMaxWriteBuffer = 4 * 1024 * 1024 // 4MB
+)
+
 // ProxyHandler implements gnet.EventHandler for the MTProxy server.
 type ProxyHandler struct {
 	gnet.BuiltinEventEngine
@@ -38,6 +54,11 @@ type ProxyHandler struct {
 
 	// Metrics
 	activeConns int64
+
+	// Cached config values for hot path (flow control watermarks)
+	softLimit       int // High watermark: pause when exceeded
+	resumeThreshold int // Low watermark: resume when below (50% of soft)
+	maxWriteBuffer  int // Hard limit: close when exceeded
 }
 
 // NewProxyHandler creates a new gnet proxy handler.
@@ -46,10 +67,30 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 		logger = defaultLogger{}
 	}
 
+	// Set buffer limits with defaults (follows Envoy's watermark pattern)
+	// High watermark (soft limit): pause when exceeded
+	// Low watermark (resume threshold): resume when below (50% of high, prevents thrashing)
+	// Hard limit: close connection to prevent OOM
+	maxWriteBuf := cfg.MaxWriteBuffer
+	if maxWriteBuf <= 0 {
+		maxWriteBuf = defaultMaxWriteBuffer
+	}
+	softLim := maxWriteBuf / 8
+	if softLim < defaultSoftLimit {
+		softLim = defaultSoftLimit
+	}
+	resumeAt := softLim / 2 // 50% hysteresis like Envoy
+	if resumeAt < defaultResumeThreshold {
+		resumeAt = defaultResumeThreshold
+	}
+
 	h := &ProxyHandler{
-		config:      cfg,
-		replayCache: NewReplayCache(1000000, 10*time.Minute),
-		logger:      logger,
+		config:          cfg,
+		replayCache:     NewReplayCache(1000000, 10*time.Minute),
+		logger:          logger,
+		softLimit:       softLim,
+		resumeThreshold: resumeAt,
+		maxWriteBuffer:  maxWriteBuf,
 	}
 
 	// Initialize connection limiter if configured
@@ -57,6 +98,8 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 		h.connLimiter = NewConnLimiter(cfg.MaxConnectionsPerIP)
 		logger.Info("Connection limiter enabled: max %d per IP+secret", cfg.MaxConnectionsPerIP)
 	}
+
+	logger.Info("Flow control: soft=%dKB hard=%dMB per connection", softLim/1024, maxWriteBuf/1024/1024)
 
 	return h
 }

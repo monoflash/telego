@@ -64,6 +64,7 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 		DCEncrypt:     ddc.encryptor,
 		DCDecrypt:     ddc.decryptor,
 		ClientEncrypt: clientEncryptor,
+		DCConn:        dcGnetConn, // Self-reference for flow control wake
 	}
 	dcGnetConn.SetContext(dcCtx)
 
@@ -273,6 +274,7 @@ func (h *ProxyHandler) dialSplice(clientConn gnet.Conn, ctx *ConnContext) {
 }
 
 // relaySpliceToClientLoop reads from splice target and writes to client.
+// Implements flow control by pausing reads when client is slow.
 func (h *ProxyHandler) relaySpliceToClientLoop(spliceConn net.Conn, clientConn gnet.Conn, _ *ConnContext) {
 	defer spliceConn.Close()
 	defer clientConn.Close()
@@ -288,6 +290,22 @@ func (h *ProxyHandler) relaySpliceToClientLoop(spliceConn net.Conn, clientConn g
 	}
 
 	for {
+		buffered := clientConn.OutboundBuffered()
+
+		// HARD LIMIT: Close if client buffer exceeds max
+		if buffered > h.maxWriteBuffer {
+			h.logger.Warn("splice: client write buffer exceeded %dMB, closing slow client",
+				h.maxWriteBuffer/1024/1024)
+			return
+		}
+
+		// SOFT LIMIT: Wait for buffer to drain before reading more
+		// This provides backpressure to splice target via TCP
+		if buffered > h.softLimit {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
 		// Refresh deadline only if threshold elapsed (reduces syscalls)
 		if idleTimeout > 0 && time.Since(lastDeadlineSet) >= deadlineRefreshThreshold {
 			lastDeadlineSet = time.Now()
