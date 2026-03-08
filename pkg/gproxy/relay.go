@@ -35,7 +35,7 @@ var (
 )
 
 // handleRelay processes data from the client and forwards to DC.
-// Implements flow control: pauses client processing when DC is slow.
+// Implements flow control with rate limiting and wake callbacks.
 func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 	// Lock-free read of relay context
 	relay := ctx.Relay()
@@ -49,29 +49,37 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 	dcEncrypt := relay.DCEncrypt
 
 	dcBuffered := dcConn.OutboundBuffered()
-	clientBuffered := c.InboundBuffered()
 
-	// HARD LIMIT: Close if total buffered data exceeds hard limit
-	if dcBuffered+clientBuffered > h.maxWriteBuffer {
-		h.logger.Warn("[%s] DC %d: buffers exceeded %dMB (dc=%dKB, client=%dKB), closing",
+	// Hard limit - OOM protection
+	if dcBuffered > h.maxWriteBuffer {
+		h.logger.Warn("[%s] DC %d: DC buffer exceeded %dMB (%dKB), closing",
 			ctx.LogPrefix(), ctx.DCID(), h.maxWriteBuffer/1024/1024,
-			dcBuffered/1024, clientBuffered/1024)
+			dcBuffered/1024)
 		return gnet.Close
 	}
-
-	// SOFT LIMIT: Pause client processing when DC buffer is full
-	// Leave data in client's inbound buffer, TCP will backpressure upstream
-	if dcBuffered > h.softLimit {
-		// Don't process - data stays in client buffer
-		return gnet.None
-	}
-
-	// Calculate how much we can send without exceeding soft limit
-	available := h.softLimit - dcBuffered
 
 	data, _ := c.Peek(-1)
 	if len(data) < faketls.RecordHeaderSize {
 		return gnet.None
+	}
+
+	// Flow control parameters
+	softLimit := h.maxWriteBuffer / 2 // 2MB for 4MB hard limit
+	resumeAt := softLimit / 2         // 1MB - resume when below this
+
+	// Rate limiting: process less when buffer is filling up
+	var maxProcess int
+	if dcBuffered > softLimit {
+		// Above soft limit: small chunks only
+		maxProcess = 64 * 1024
+		h.logger.Info("[%s] backpressure: DC buffer %dKB > soft limit, throttling to 64KB chunks",
+			ctx.LogPrefix(), dcBuffered/1024)
+	} else if dcBuffered > resumeAt {
+		// Between resume and soft: medium chunks
+		maxProcess = 256 * 1024
+	} else {
+		// Full speed - process everything
+		maxProcess = len(data)
 	}
 
 	// Get pooled buffer for batching writes to DC
@@ -79,10 +87,12 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 	batchBuf := *batchBufPtr
 
 	batchOffset := 0
+	processed := 0
+	rateLimited := false // Track if we stopped due to rate limiting vs incomplete record
 
-	// Process complete TLS records (limited by available space)
+	// Process complete TLS records
 	consumed := 0
-	for len(data) >= faketls.RecordHeaderSize && batchOffset < available {
+	for len(data) >= faketls.RecordHeaderSize {
 		// Parse TLS record header
 		recordType := data[0]
 		payloadLen := int(binary.BigEndian.Uint16(data[3:5]))
@@ -95,12 +105,12 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 
 		// Only process ApplicationData records
 		if recordType == faketls.RecordTypeApplicationData {
-			// Extract payload
 			payload := data[faketls.RecordHeaderSize:recordLen]
 
-			// Check if we'd exceed available space
-			if batchOffset+len(payload) > available {
-				break // Stop processing, leave remaining for next call
+			// Check if we'd exceed maxProcess (but always process at least one record)
+			if processed > 0 && processed+len(payload) > maxProcess {
+				rateLimited = true
+				break
 			}
 
 			// Check if batch buffer has space
@@ -119,46 +129,28 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 			decryptor.XORKeyStream(batchBuf[batchOffset:batchOffset+len(payload)], payload)
 			dcEncrypt.XORKeyStream(batchBuf[batchOffset:batchOffset+len(payload)], batchBuf[batchOffset:batchOffset+len(payload)])
 			batchOffset += len(payload)
+			processed += len(payload)
 		}
 
 		consumed += recordLen
 		data = data[recordLen:]
 	}
 
-	// Check if there's more client data we couldn't process
-	hasMoreClientData := len(data) >= faketls.RecordHeaderSize
-
-	// Flush remaining batch
+	// Flush remaining batch - always use sync write
 	if batchOffset > 0 {
-		// Fast path: sync write when no backpressure needed
-		// Slow path: async write with wake callback when client has pending data
-		if !hasMoreClientData {
-			// Normal case - sync write
-			_, err := dcConn.Write(batchBuf[:batchOffset])
-			dcBufPool.Put(batchBufPtr)
-			if err != nil {
-				return gnet.Close
-			}
-		} else {
-			// Backpressure case - async write with wake callback
-			clientConn := c
-			resumeAt := h.resumeThreshold // Low watermark for hysteresis
-
-			err := dcConn.AsyncWrite(batchBuf[:batchOffset], func(dc gnet.Conn, err error) error {
-				dcBufPool.Put(batchBufPtr)
-				// Wake client when DC buffer drops below low watermark (prevents thrashing)
-				if err == nil && dc.OutboundBuffered() < resumeAt {
-					clientConn.Wake(nil)
-				}
-				return nil
-			})
-			if err != nil {
-				dcBufPool.Put(batchBufPtr)
-				return gnet.Close
-			}
+		_, err := dcConn.Write(batchBuf[:batchOffset])
+		dcBufPool.Put(batchBufPtr)
+		if err != nil {
+			return gnet.Close
 		}
 	} else {
 		dcBufPool.Put(batchBufPtr)
+	}
+
+	// Only wake if we rate-limited and there's more data to process
+	// Don't wake for incomplete records - gnet will call OnTraffic when more data arrives
+	if rateLimited {
+		c.Wake(nil)
 	}
 
 	if consumed > 0 {

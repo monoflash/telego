@@ -73,7 +73,7 @@ func (h *dcEventHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 }
 
 // handleDCTraffic processes data from DC and forwards to client.
-// Implements flow control: pauses DC when client is slow, resumes when caught up.
+// Implements flow control with rate limiting and wake callbacks.
 func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) gnet.Action {
 	clientConn := dcCtx.ClientConn
 	clientCtx := dcCtx.ClientCtx
@@ -84,46 +84,49 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	}
 
 	clientBuffered := clientConn.OutboundBuffered()
-	dcBuffered := dcConn.InboundBuffered()
 
-	// HARD LIMIT: Close if total buffered data exceeds hard limit
-	// This is the last resort to prevent memory exhaustion
-	if clientBuffered+dcBuffered > h.maxWriteBuffer {
-		h.logger.Warn("[%s] DC %d: buffers exceeded %dMB (client=%dKB, dc=%dKB), closing",
+	// Hard limit - OOM protection
+	if clientBuffered > h.maxWriteBuffer {
+		h.logger.Warn("[%s] DC %d: client buffer exceeded %dMB (%dKB), closing slow client",
 			clientCtx.LogPrefix(), clientCtx.DCID(), h.maxWriteBuffer/1024/1024,
-			clientBuffered/1024, dcBuffered/1024)
+			clientBuffered/1024)
 		return gnet.Close
 	}
 
-	// SOFT LIMIT: Pause DC processing when client buffer is full
-	// Leave data in DC's inbound buffer, TCP will backpressure upstream
-	if clientBuffered > h.softLimit {
-		// Don't process - data stays in DC buffer
-		// Will be woken when client buffer drains (via AsyncWrite callback)
-		return gnet.None
-	}
-
-	// Calculate how much we can send without exceeding soft limit
-	available := h.softLimit - clientBuffered
-	if available <= 0 {
-		return gnet.None
-	}
-
-	// Read available data from DC (limited to what we can accept)
 	data, _ := dcConn.Peek(-1)
 	if len(data) == 0 {
 		return gnet.None
 	}
 
-	// Limit processing to available space (with some headroom for TLS overhead)
-	// TLS adds ~5 bytes per 16KB, so ~0.03% overhead - negligible
-	if len(data) > available {
-		data = data[:available]
+	// Flow control parameters
+	softLimit := h.maxWriteBuffer / 2 // 2MB for 4MB hard limit
+	resumeAt := softLimit / 2         // 1MB - resume when below this
+
+	// Rate limiting: process less when buffer is filling up
+	maxProcess := len(data) // Default: full speed
+	if clientBuffered > softLimit {
+		// Above soft limit: small chunks only
+		maxProcess = 64 * 1024
+		if maxProcess > len(data) {
+			maxProcess = len(data)
+		}
+		h.logger.Info("[%s] backpressure: client buffer %dKB > soft limit, throttling to 64KB chunks",
+			clientCtx.LogPrefix(), clientBuffered/1024)
+	} else if clientBuffered > resumeAt {
+		// Between resume and soft: medium chunks
+		maxProcess = 256 * 1024
+		if maxProcess > len(data) {
+			maxProcess = len(data)
+		}
 	}
+	// else: full speed - process all available data
+
+	// Limit data to what we'll process
+	processData := data[:maxProcess]
 
 	// Calculate TLS output size
-	numRecords := (len(data) + faketls.MaxRecordPayload - 1) / faketls.MaxRecordPayload
-	tlsSize := len(data) + numRecords*faketls.RecordHeaderSize
+	numRecords := (len(processData) + faketls.MaxRecordPayload - 1) / faketls.MaxRecordPayload
+	tlsSize := len(processData) + numRecords*faketls.RecordHeaderSize
 
 	// Get buffer from pool
 	tlsBufPtr := dcBufPool.Get().(*[]byte)
@@ -140,8 +143,8 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	// Decrypt from DC, encrypt for client, wrap in TLS - all in one pass
 	srcOffset := 0
 	dstOffset := 0
-	for srcOffset < len(data) {
-		chunk := min(faketls.MaxRecordPayload, len(data)-srcOffset)
+	for srcOffset < len(processData) {
+		chunk := min(faketls.MaxRecordPayload, len(processData)-srcOffset)
 
 		// Write TLS header
 		tlsBuf[dstOffset] = faketls.RecordTypeApplicationData
@@ -152,7 +155,7 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 		dstOffset += faketls.RecordHeaderSize
 
 		// Decrypt from DC into TLS payload
-		dcCtx.DCDecrypt.XORKeyStream(tlsBuf[dstOffset:dstOffset+chunk], data[srcOffset:srcOffset+chunk])
+		dcCtx.DCDecrypt.XORKeyStream(tlsBuf[dstOffset:dstOffset+chunk], processData[srcOffset:srcOffset+chunk])
 
 		// Encrypt for client (in-place)
 		dcCtx.ClientEncrypt.XORKeyStream(tlsBuf[dstOffset:dstOffset+chunk], tlsBuf[dstOffset:dstOffset+chunk])
@@ -161,42 +164,22 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 		srcOffset += chunk
 	}
 
-	// Discard only what we processed from DC buffer
-	dcConn.Discard(len(data))
+	// Discard what we processed
+	dcConn.Discard(len(processData))
 
-	// Check if there's more data in DC buffer that we couldn't process
-	hasMoreDCData := dcConn.InboundBuffered() > 0
+	// Always use sync write - simpler and proven to work
+	_, err := clientConn.Write(tlsBuf)
+	if tlsBufPtr != nil {
+		dcBufPool.Put(tlsBufPtr)
+	}
+	if err != nil {
+		return gnet.Close
+	}
 
-	// Fast path: sync write when no backpressure needed
-	// Slow path: async write with wake callback when DC has pending data
-	if !hasMoreDCData {
-		// Normal case - sync write, return buffer immediately
-		_, err := clientConn.Write(tlsBuf)
-		if tlsBufPtr != nil {
-			dcBufPool.Put(tlsBufPtr)
-		}
-		if err != nil {
-			return gnet.Close
-		}
-	} else {
-		// Backpressure case - async write with wake callback
-		resumeAt := h.resumeThreshold // Low watermark for hysteresis
-		err := clientConn.AsyncWrite(tlsBuf, func(c gnet.Conn, err error) error {
-			if tlsBufPtr != nil {
-				dcBufPool.Put(tlsBufPtr)
-			}
-			// Wake DC when client buffer drops below low watermark (prevents thrashing)
-			if err == nil && c.OutboundBuffered() < resumeAt {
-				dcCtx.DCConn.Wake(nil)
-			}
-			return nil
-		})
-		if err != nil {
-			if tlsBufPtr != nil {
-				dcBufPool.Put(tlsBufPtr)
-			}
-			return gnet.Close
-		}
+	// If we rate-limited and there's more data, wake self to continue
+	// This keeps processing without cross-event-loop Wake issues
+	if dcConn.InboundBuffered() > 0 {
+		dcConn.Wake(nil)
 	}
 
 	return gnet.None

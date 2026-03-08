@@ -80,12 +80,14 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 	// Atomically set relay context and state
 	ctx.SetRelay(relay)
 
-	// Process any pending data
+	// Process any pending data from handshake
 	if len(pendingData) > 0 {
 		h.sendPendingDataGnet(dcGnetConn, relay, pendingData)
 	}
 
-	// No goroutine needed - DC traffic handled by dcEventHandler.OnTraffic
+	// Wake client to process any data buffered during DC dial
+	// Without this, data that arrived while in StateDialingDC would never be processed
+	clientConn.Wake(nil)
 }
 
 // dialDirectDC connects directly to Telegram DC with obfuscated2 handshake.
@@ -299,9 +301,9 @@ func (h *ProxyHandler) relaySpliceToClientLoop(spliceConn net.Conn, clientConn g
 			return
 		}
 
-		// SOFT LIMIT: Wait for buffer to drain before reading more
+		// Throttle when buffer is getting full (half of hard limit)
 		// This provides backpressure to splice target via TCP
-		if buffered > h.softLimit {
+		if buffered > h.maxWriteBuffer/2 {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
