@@ -169,8 +169,8 @@ func (h *ProxyHandler) handleTLSPayload(c gnet.Conn, ctx *ConnContext) gnet.Acti
 		}
 	}
 
-	// Send ServerHello asynchronously
-	c.AsyncWrite(response, nil)
+	// Send ServerHello - Write() is safe here since we're in EventHandler
+	c.Write(response)
 
 	// Transition to reading obfuscated2 frame
 	ctx.SetState(StateReadO2Frame)

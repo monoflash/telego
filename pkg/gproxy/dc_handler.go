@@ -208,17 +208,12 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 		dcEncrypt.XORKeyStream(decrypted, decrypted)
 	}
 
-	// Async write to DC - buffer returned to pool after write completes
-	err := dcConn.AsyncWrite(decrypted, func(c gnet.Conn, err error) error {
-		if bufPtr != nil {
-			relayBufPool.Put(bufPtr)
-		}
-		return nil
-	})
+	// Write to DC - Write() copies so we can return buffer immediately
+	_, err := dcConn.Write(decrypted)
+	if bufPtr != nil {
+		relayBufPool.Put(bufPtr)
+	}
 	if err != nil {
-		if bufPtr != nil {
-			relayBufPool.Put(bufPtr)
-		}
 		h.logger.Debug("failed to send pending data to DC: %v", err)
 	}
 }

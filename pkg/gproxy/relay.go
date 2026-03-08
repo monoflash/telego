@@ -78,18 +78,9 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 
 			// Check if batch buffer has space
 			if batchOffset+len(payload) > len(batchBuf) {
-				// Flush current batch via async write
+				// Flush current batch - Write() copies so no extra buffer needed
 				if batchOffset > 0 {
-					// Get pooled buffer for async write
-					flushBufPtr := dcBufPool.Get().(*[]byte)
-					flushBuf := (*flushBufPtr)[:batchOffset]
-					copy(flushBuf, batchBuf[:batchOffset])
-					err := dcConn.AsyncWrite(flushBuf, func(c gnet.Conn, err error) error {
-						dcBufPool.Put(flushBufPtr)
-						return nil
-					})
-					if err != nil {
-						dcBufPool.Put(flushBufPtr)
+					if _, err := dcConn.Write(batchBuf[:batchOffset]); err != nil {
 						dcBufPool.Put(batchBufPtr)
 						return gnet.Close
 					}
@@ -107,20 +98,14 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 		data = data[recordLen:]
 	}
 
-	// Flush remaining batch
+	// Flush remaining batch - Write() copies so we can return buffer immediately
 	if batchOffset > 0 {
-		// For final batch, we can reuse the pool buffer with callback
-		finalBuf := batchBuf[:batchOffset]
-		err := dcConn.AsyncWrite(finalBuf, func(c gnet.Conn, err error) error {
-			dcBufPool.Put(batchBufPtr)
-			return nil
-		})
+		_, err := dcConn.Write(batchBuf[:batchOffset])
+		dcBufPool.Put(batchBufPtr)
 		if err != nil {
-			dcBufPool.Put(batchBufPtr)
 			return gnet.Close
 		}
 	} else {
-		// No data written, return buffer immediately
 		dcBufPool.Put(batchBufPtr)
 	}
 

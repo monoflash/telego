@@ -129,17 +129,12 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	// Discard processed data from DC buffer
 	dcConn.Discard(len(data))
 
-	// Async write to client - buffer returned to pool after write completes
-	err := clientConn.AsyncWrite(tlsBuf, func(c gnet.Conn, err error) error {
-		if tlsBufPtr != nil {
-			dcBufPool.Put(tlsBufPtr)
-		}
-		return nil
-	})
+	// Sync write to client - Write() copies buffer so we can return to pool immediately
+	_, err := clientConn.Write(tlsBuf)
+	if tlsBufPtr != nil {
+		dcBufPool.Put(tlsBufPtr)
+	}
 	if err != nil {
-		if tlsBufPtr != nil {
-			dcBufPool.Put(tlsBufPtr)
-		}
 		return gnet.Close
 	}
 
