@@ -72,7 +72,8 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 	if dcBuffered > softLimit {
 		// Above soft limit: small chunks only
 		maxProcess = 64 * 1024
-		h.logger.Info("[%s] backpressure: DC buffer %dKB > soft limit, throttling to 64KB chunks",
+		// Debug level to avoid log spam - backpressure is normal under load
+		h.logger.Debug("[%s] backpressure: DC buffer %dKB > soft limit, throttling",
 			ctx.LogPrefix(), dcBuffered/1024)
 	} else if dcBuffered > resumeAt {
 		// Between resume and soft: medium chunks

@@ -110,7 +110,8 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 		if maxProcess > len(data) {
 			maxProcess = len(data)
 		}
-		h.logger.Info("[%s] backpressure: client buffer %dKB > soft limit, throttling to 64KB chunks",
+		// Debug level to avoid log spam - backpressure is normal for slow clients
+		h.logger.Debug("[%s] backpressure: client buffer %dKB > soft limit, throttling",
 			clientCtx.LogPrefix(), clientBuffered/1024)
 	} else if clientBuffered > resumeAt {
 		// Between resume and soft: medium chunks
