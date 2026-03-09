@@ -2,6 +2,9 @@ package gproxy
 
 import (
 	"crypto/cipher"
+	"errors"
+	"io"
+	"time"
 
 	"github.com/panjf2000/gnet/v2"
 
@@ -28,6 +31,9 @@ type DCConnContext struct {
 
 	// Client ciphers (cached from relay context)
 	ClientEncrypt cipher.Stream // encrypt TO client
+
+	// Flow control: DC connection reference for wake mechanism
+	DCConn gnet.Conn
 }
 
 // OnTraffic handles data arriving from DC.
@@ -45,6 +51,21 @@ func (h *dcEventHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 	if !ok || ctx == nil {
 		return gnet.None
 	}
+
+	// Log DC disconnect with details for debugging
+	if ctx.ClientCtx != nil {
+		prefix := ctx.ClientCtx.LogPrefix()
+		dcID := ctx.ClientCtx.DCID()
+		duration := time.Since(ctx.ClientCtx.connTime)
+
+		isRealError := err != nil && !errors.Is(err, io.EOF)
+		if isRealError {
+			h.proxy.logger.Warn("[%s] DC %d disconnected (%v): %v", prefix, dcID, duration.Round(time.Millisecond), err)
+		} else {
+			h.proxy.logger.Debug("[%s] DC %d disconnected (%v)", prefix, dcID, duration.Round(time.Millisecond))
+		}
+	}
+
 	if ctx.ClientConn != nil {
 		ctx.ClientConn.Close()
 	}
@@ -52,7 +73,7 @@ func (h *dcEventHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 }
 
 // handleDCTraffic processes data from DC and forwards to client.
-// This is the event-driven replacement for relayDCToClientLoop.
+// Implements flow control with rate limiting and wake callbacks.
 func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) gnet.Action {
 	clientConn := dcCtx.ClientConn
 	clientCtx := dcCtx.ClientCtx
@@ -62,15 +83,52 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 		return gnet.Close
 	}
 
-	// Read available data from DC
+	clientBuffered := clientConn.OutboundBuffered()
+
 	data, _ := dcConn.Peek(-1)
 	if len(data) == 0 {
 		return gnet.None
 	}
 
+	// Flow control parameters
+	softLimit := h.maxWriteBuffer / 2 // 2MB for 4MB hard limit
+	resumeAt := softLimit / 2         // 1MB - resume when below this
+
+	// Rate limiting: process less when buffer is filling up
+	// No hard disconnects - let TCP flow control + idle timeout handle stuck clients
+	maxProcess := len(data) // Default: full speed
+	if clientBuffered > h.maxWriteBuffer {
+		// Above hard limit: trickle mode - keep alive but minimal throughput
+		// TCP backpressure will naturally slow DC, idle timeout catches truly stuck clients
+		maxProcess = 16 * 1024
+		if maxProcess > len(data) {
+			maxProcess = len(data)
+		}
+		h.logger.Debug("[%s] backpressure: client buffer %dMB > hard limit, trickle mode",
+			clientCtx.LogPrefix(), clientBuffered/1024/1024)
+	} else if clientBuffered > softLimit {
+		// Above soft limit: small chunks only
+		maxProcess = 64 * 1024
+		if maxProcess > len(data) {
+			maxProcess = len(data)
+		}
+		h.logger.Debug("[%s] backpressure: client buffer %dKB > soft limit, throttling",
+			clientCtx.LogPrefix(), clientBuffered/1024)
+	} else if clientBuffered > resumeAt {
+		// Between resume and soft: medium chunks
+		maxProcess = 256 * 1024
+		if maxProcess > len(data) {
+			maxProcess = len(data)
+		}
+	}
+	// else: full speed - process all available data
+
+	// Limit data to what we'll process
+	processData := data[:maxProcess]
+
 	// Calculate TLS output size
-	numRecords := (len(data) + faketls.MaxRecordPayload - 1) / faketls.MaxRecordPayload
-	tlsSize := len(data) + numRecords*faketls.RecordHeaderSize
+	numRecords := (len(processData) + faketls.MaxRecordPayload - 1) / faketls.MaxRecordPayload
+	tlsSize := len(processData) + numRecords*faketls.RecordHeaderSize
 
 	// Get buffer from pool
 	tlsBufPtr := dcBufPool.Get().(*[]byte)
@@ -87,8 +145,8 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	// Decrypt from DC, encrypt for client, wrap in TLS - all in one pass
 	srcOffset := 0
 	dstOffset := 0
-	for srcOffset < len(data) {
-		chunk := min(faketls.MaxRecordPayload, len(data)-srcOffset)
+	for srcOffset < len(processData) {
+		chunk := min(faketls.MaxRecordPayload, len(processData)-srcOffset)
 
 		// Write TLS header
 		tlsBuf[dstOffset] = faketls.RecordTypeApplicationData
@@ -99,7 +157,7 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 		dstOffset += faketls.RecordHeaderSize
 
 		// Decrypt from DC into TLS payload
-		dcCtx.DCDecrypt.XORKeyStream(tlsBuf[dstOffset:dstOffset+chunk], data[srcOffset:srcOffset+chunk])
+		dcCtx.DCDecrypt.XORKeyStream(tlsBuf[dstOffset:dstOffset+chunk], processData[srcOffset:srcOffset+chunk])
 
 		// Encrypt for client (in-place)
 		dcCtx.ClientEncrypt.XORKeyStream(tlsBuf[dstOffset:dstOffset+chunk], tlsBuf[dstOffset:dstOffset+chunk])
@@ -108,21 +166,22 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 		srcOffset += chunk
 	}
 
-	// Discard processed data from DC buffer
-	dcConn.Discard(len(data))
+	// Discard what we processed
+	dcConn.Discard(len(processData))
 
-	// Async write to client - buffer returned to pool after write completes
-	err := clientConn.AsyncWrite(tlsBuf, func(c gnet.Conn, err error) error {
-		if tlsBufPtr != nil {
-			dcBufPool.Put(tlsBufPtr)
-		}
-		return nil
-	})
+	// Always use sync write - simpler and proven to work
+	_, err := clientConn.Write(tlsBuf)
+	if tlsBufPtr != nil {
+		dcBufPool.Put(tlsBufPtr)
+	}
 	if err != nil {
-		if tlsBufPtr != nil {
-			dcBufPool.Put(tlsBufPtr)
-		}
 		return gnet.Close
+	}
+
+	// If we rate-limited and there's more data, wake self to continue
+	// This keeps processing without cross-event-loop Wake issues
+	if dcConn.InboundBuffered() > 0 {
+		dcConn.Wake(nil)
 	}
 
 	return gnet.None

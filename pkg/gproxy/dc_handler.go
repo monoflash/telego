@@ -64,6 +64,7 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 		DCEncrypt:     ddc.encryptor,
 		DCDecrypt:     ddc.decryptor,
 		ClientEncrypt: clientEncryptor,
+		DCConn:        dcGnetConn, // Self-reference for flow control wake
 	}
 	dcGnetConn.SetContext(dcCtx)
 
@@ -79,12 +80,14 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 	// Atomically set relay context and state
 	ctx.SetRelay(relay)
 
-	// Process any pending data
+	// Process any pending data from handshake
 	if len(pendingData) > 0 {
 		h.sendPendingDataGnet(dcGnetConn, relay, pendingData)
 	}
 
-	// No goroutine needed - DC traffic handled by dcEventHandler.OnTraffic
+	// Wake client to process any data buffered during DC dial
+	// Without this, data that arrived while in StateDialingDC would never be processed
+	clientConn.Wake(nil)
 }
 
 // dialDirectDC connects directly to Telegram DC with obfuscated2 handshake.
@@ -128,16 +131,24 @@ func (h *ProxyHandler) dialDirectDC(dcID int) (*directDCConn, error) {
 
 	var conn netx.Conn
 	var err error
+	var usedAddr dc.Addr
+	dialStart := time.Now()
 	for _, addr := range addrs {
 		conn, err = dialFunc(addr.Network, addr.Address)
 		if err == nil {
+			usedAddr = addr
 			break
 		}
+		h.logger.Debug("DC %d dial failed: %s: %v", dcID, addr.Address, err)
 	}
+	dialDuration := time.Since(dialStart)
 
 	if err != nil {
+		h.logger.Warn("DC %d all addresses failed after %v", dcID, dialDuration)
 		return nil, err
 	}
+
+	h.logger.Debug("DC %d connected to %s in %v", dcID, usedAddr.Address, dialDuration)
 
 	// Tune the connection
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
@@ -200,17 +211,12 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 		dcEncrypt.XORKeyStream(decrypted, decrypted)
 	}
 
-	// Async write to DC - buffer returned to pool after write completes
-	err := dcConn.AsyncWrite(decrypted, func(c gnet.Conn, err error) error {
-		if bufPtr != nil {
-			relayBufPool.Put(bufPtr)
-		}
-		return nil
-	})
+	// Write to DC - Write() copies so we can return buffer immediately
+	_, err := dcConn.Write(decrypted)
+	if bufPtr != nil {
+		relayBufPool.Put(bufPtr)
+	}
 	if err != nil {
-		if bufPtr != nil {
-			relayBufPool.Put(bufPtr)
-		}
 		h.logger.Debug("failed to send pending data to DC: %v", err)
 	}
 }
@@ -270,6 +276,7 @@ func (h *ProxyHandler) dialSplice(clientConn gnet.Conn, ctx *ConnContext) {
 }
 
 // relaySpliceToClientLoop reads from splice target and writes to client.
+// Implements flow control by pausing reads when client is slow.
 func (h *ProxyHandler) relaySpliceToClientLoop(spliceConn net.Conn, clientConn gnet.Conn, _ *ConnContext) {
 	defer spliceConn.Close()
 	defer clientConn.Close()
@@ -285,6 +292,22 @@ func (h *ProxyHandler) relaySpliceToClientLoop(spliceConn net.Conn, clientConn g
 	}
 
 	for {
+		buffered := clientConn.OutboundBuffered()
+
+		// HARD LIMIT: Close if client buffer exceeds max
+		if buffered > h.maxWriteBuffer {
+			h.logger.Warn("splice: client write buffer exceeded %dMB, closing slow client",
+				h.maxWriteBuffer/1024/1024)
+			return
+		}
+
+		// Throttle when buffer is getting full (half of hard limit)
+		// This provides backpressure to splice target via TCP
+		if buffered > h.maxWriteBuffer/2 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
 		// Refresh deadline only if threshold elapsed (reduces syscalls)
 		if idleTimeout > 0 && time.Since(lastDeadlineSet) >= deadlineRefreshThreshold {
 			lastDeadlineSet = time.Now()

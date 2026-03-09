@@ -3,11 +3,19 @@ package gproxy
 import (
 	"errors"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
 
 	"github.com/scratch-net/telego/pkg/tlsfront"
+)
+
+// Buffer limit for OOM protection
+const (
+	// Hard limit: close connection when buffer exceeds this
+	// Prevents memory exhaustion from slow clients
+	defaultMaxWriteBuffer = 4 * 1024 * 1024 // 4MB
 )
 
 // ProxyHandler implements gnet.EventHandler for the MTProxy server.
@@ -37,6 +45,9 @@ type ProxyHandler struct {
 
 	// Metrics
 	activeConns int64
+
+	// Hard limit for OOM protection (bytes per connection)
+	maxWriteBuffer int
 }
 
 // NewProxyHandler creates a new gnet proxy handler.
@@ -45,10 +56,17 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 		logger = defaultLogger{}
 	}
 
+	// Set hard limit for OOM protection
+	maxWriteBuf := cfg.MaxWriteBuffer
+	if maxWriteBuf <= 0 {
+		maxWriteBuf = defaultMaxWriteBuffer
+	}
+
 	h := &ProxyHandler{
-		config:      cfg,
-		replayCache: NewReplayCache(1000000, 10*time.Minute),
-		logger:      logger,
+		config:         cfg,
+		replayCache:    NewReplayCache(1000000, 10*time.Minute),
+		logger:         logger,
+		maxWriteBuffer: maxWriteBuf,
 	}
 
 	// Initialize connection limiter if configured
@@ -56,6 +74,8 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 		h.connLimiter = NewConnLimiter(cfg.MaxConnectionsPerIP)
 		logger.Info("Connection limiter enabled: max %d per IP+secret", cfg.MaxConnectionsPerIP)
 	}
+
+	logger.Info("OOM protection: max %dMB write buffer per connection", maxWriteBuf/1024/1024)
 
 	return h
 }
@@ -85,7 +105,8 @@ func (h *ProxyHandler) OnOpen(c gnet.Conn) ([]byte, gnet.Action) {
 
 	c.SetContext(ctx)
 
-	h.logger.Debug("[#%d] new connection from %s", ctx.id, c.RemoteAddr())
+	conns := atomic.AddInt64(&h.activeConns, 1)
+	h.logger.Debug("[#%d] new connection from %s (active: %d)", ctx.id, c.RemoteAddr(), conns)
 
 	// Set read deadline for handshake
 	c.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -95,8 +116,11 @@ func (h *ProxyHandler) OnOpen(c gnet.Conn) ([]byte, gnet.Action) {
 
 // OnClose is called when a connection is closed.
 func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
+	conns := atomic.AddInt64(&h.activeConns, -1)
+
 	ctx, ok := c.Context().(*ConnContext)
 	if !ok || ctx == nil {
+		h.logger.Debug("[?] connection closed without context (active: %d)", conns)
 		return gnet.None
 	}
 
@@ -119,21 +143,22 @@ func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 	}
 	ctx.mu.Unlock()
 
-	// Log closure
+	// Log closure with DC info for debugging
 	duration := time.Since(ctx.connTime)
 	prefix := ctx.LogPrefix()
+	dcID := ctx.DCID()
 
 	// Determine if this is a real error (not just EOF/normal close)
 	isRealError := err != nil && !errors.Is(err, io.EOF)
 
 	if authenticated {
 		if isRealError {
-			h.logger.Warn("[%s] closed (%v): %v", prefix, duration.Round(time.Millisecond), err)
+			h.logger.Warn("[%s] DC %d closed (%v): %v (active: %d)", prefix, dcID, duration.Round(time.Millisecond), err, conns)
 		} else {
-			h.logger.Info("[%s] closed (%v)", prefix, duration.Round(time.Millisecond))
+			h.logger.Info("[%s] DC %d closed (%v) (active: %d)", prefix, dcID, duration.Round(time.Millisecond), conns)
 		}
 	} else if isRealError {
-		h.logger.Debug("[%s] closed (%v): %v", prefix, duration.Round(time.Millisecond), err)
+		h.logger.Debug("[%s] closed (%v): %v (active: %d)", prefix, duration.Round(time.Millisecond), err, conns)
 	}
 
 	return gnet.None

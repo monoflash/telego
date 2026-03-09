@@ -2,7 +2,7 @@
   <img src="docs/logo.jpg" alt="TeleGO Logo" width="200">
 </p>
 
-<h1 align="center">TeleGO</h1>
+<h1 align="center">TeleGO</h1> <!-- Название проекта читается "ТелЕго", см https://ru.wikipedia.org/wiki/%D0%96%D0%B0%D1%80%D0%B3%D0%BE%D0%BD_%D0%BF%D0%B0%D0%B4%D0%BE%D0%BD%D0%BA%D0%BE%D0%B2 -->
 
 <p align="center">
   <strong>High-performance Telegram MTProxy in Go with TLS fronting</strong>
@@ -34,7 +34,7 @@
 - **Event-driven I/O** — Built on [gnet](https://github.com/panjf2000/gnet) with epoll/kqueue for maximum efficiency
 - **Zero-copy relaying** — Direct buffer manipulation without intermediate copies
 - **Buffer pooling** — Striped sync.Pool design eliminates allocations in hot paths
-- **Optimized TCP** — `TCP_NODELAY`, `TCP_QUICKACK`, 768KB buffers, `SO_REUSEPORT`
+- **Optimized TCP** — `TCP_NODELAY`, `TCP_QUICKACK`, 64KB buffers, `SO_REUSEPORT`
 
 ### Security
 - **TLS Fronting** — Fetches real certificates from mask host for perfect camouflage
@@ -285,7 +285,7 @@ Tested on Intel i9-12900K, Linux 6.6:
 ### Optimizations
 
 - **Striped locking** — 32-shard replay cache, 64-shard connection limiter
-- **Buffer pools** — 768KB DC buffers, 256KB read buffers, pooled blake3 hashers
+- **Buffer pools** — 64KB DC buffers, 64KB read buffers, pooled blake3 hashers
 - **Zero-copy crypto** — XORKeyStream directly into output buffers
 - **Batched writes** — Multiple TLS records coalesced into single syscall
 - **Lock-free state** — Atomic state machine for connection handling
@@ -355,7 +355,3 @@ This project was inspired by and builds upon ideas from:
 - **[telemt](https://github.com/nicksnet/telemt)** — High-performance Rust MTProxy implementation
 
 ---
-
-<p align="center">
-  Made with Go
-</p>

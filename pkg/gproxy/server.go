@@ -61,6 +61,9 @@ type Config struct {
 	ProxyProtocol       bool // Accept incoming PROXY protocol headers
 	MaxConnectionsPerIP int  // Per IP+secret limit, 0 = unlimited
 
+	// Backpressure
+	MaxWriteBuffer int // Max pending bytes per connection before closing (0 = 4MB default)
+
 	// gnet-specific
 	Multicore    bool // Use multiple event loops
 	ReusePort    bool // Enable SO_REUSEPORT
@@ -138,8 +141,8 @@ func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
 			dcHandler,
 			gnet.WithMulticore(cfg.Multicore),
 			gnet.WithLockOSThread(cfg.LockOSThread),
-			gnet.WithReadBufferCap(256*1024),  // 256KB read buffer
-			gnet.WithWriteBufferCap(768*1024), // 768KB write buffer
+			gnet.WithReadBufferCap(128*1024),  // 128KB read buffer
+			gnet.WithWriteBufferCap(256*1024), // 256KB write buffer - more batching to DC
 		)
 		if err != nil {
 			ch <- fmt.Errorf("failed to create DC client: %w", err)

@@ -60,10 +60,12 @@ type TLSFrontingConfig struct {
 
 // PerformanceConfig configures performance settings.
 type PerformanceConfig struct {
-	TCPBufferKB   int      `toml:"tcp-buffer-kb"`
-	NumEventLoops int      `toml:"num-event-loops"` // gnet event loops (0 = auto, uses all cores)
-	PreferIP      string   `toml:"prefer-ip"`
-	IdleTimeout   Duration `toml:"idle-timeout"`
+	TCPBufferKB      int      `toml:"tcp-buffer-kb"`
+	NumEventLoops    int      `toml:"num-event-loops"` // gnet event loops (0 = auto, uses all cores)
+	PreferIP         string   `toml:"prefer-ip"`
+	IdleTimeout      Duration `toml:"idle-timeout"`
+	MaxWriteBufferMB int      `toml:"max-write-buffer-mb"` // Max pending bytes per connection (0 = 4MB)
+	PprofAddr        string   `toml:"pprof-addr"`          // e.g. "localhost:6060" for memory profiling
 }
 
 // UpstreamConfig configures upstream (DC) connection settings.
@@ -199,6 +201,11 @@ func (c *Config) ToGProxyConfig() (gproxy.Config, error) {
 	cfg.MaxConnectionsPerIP = c.General.MaxConnectionsPerIP
 	if cfg.MaxConnectionsPerIP == 0 {
 		cfg.MaxConnectionsPerIP = c.MaxConnectionsPerIP
+	}
+
+	// Backpressure settings
+	if c.Performance.MaxWriteBufferMB > 0 {
+		cfg.MaxWriteBuffer = c.Performance.MaxWriteBufferMB * 1024 * 1024
 	}
 
 	return cfg, nil
