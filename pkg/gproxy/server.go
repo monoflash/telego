@@ -110,7 +110,15 @@ func IsUnixSocket(addr string) bool {
 // Run starts the proxy with graceful shutdown support using gnet.
 // Returns a shutdown function that can be called to stop the server.
 func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
+	shutdownFn, _, ch := RunWithHandler(cfg, logger)
+	return shutdownFn, ch
+}
+
+// RunWithHandler starts the proxy and returns the handler for hot-reload.
+// Returns a shutdown function, the handler (for hot-reload), and error channel.
+func RunWithHandler(cfg *Config, logger Logger) (shutdown func(), handler *ProxyHandler, errCh <-chan error) {
 	ch := make(chan error, 1)
+	handlerCh := make(chan *ProxyHandler, 1)
 
 	if logger == nil {
 		logger = defaultLogger{}
@@ -133,10 +141,11 @@ func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
 	ready := make(chan struct{})
 
 	go func() {
-		handler := NewProxyHandler(cfg, logger)
+		h := NewProxyHandler(cfg, logger)
+		handlerCh <- h // Send handler for hot-reload access
 
 		// Initialize DC client for outgoing connections
-		dcHandler := &dcEventHandler{proxy: handler}
+		dcHandler := &dcEventHandler{proxy: h}
 		dcClient, err := gnet.NewClient(
 			dcHandler,
 			gnet.WithMulticore(cfg.Multicore),
@@ -152,7 +161,7 @@ func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
 			ch <- fmt.Errorf("failed to start DC client: %w", err)
 			return
 		}
-		handler.dcClient = dcClient
+		h.dcClient = dcClient
 		if cfg.Socks5Addr != "" {
 			logger.Debug("DC client started with SOCKS5 proxy: %s", cfg.Socks5Addr)
 		} else {
@@ -161,11 +170,11 @@ func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
 
 		// Initialize TLS fronting if configured
 		if cfg.MaskHost != "" && cfg.FetchRealCert {
-			handler.certFetcher = tlsfront.NewCertFetcher(cfg.CertRefreshHours, cfg.MaskHost)
+			h.certFetcher = tlsfront.NewCertFetcher(cfg.CertRefreshHours, cfg.MaskHost)
 
 			// Fetch certificate synchronously at startup
 			logger.Debug("Fetching TLS certificate from %s:%d (SNI: %s)...", cfg.CertHost, cfg.CertPort, cfg.MaskHost)
-			cert, err := handler.certFetcher.FetchCert(cfg.CertHost, cfg.CertPort)
+			cert, err := h.certFetcher.FetchCert(cfg.CertHost, cfg.CertPort)
 			if err != nil {
 				logger.Warn("Failed to fetch certificate: %v (will retry in background)", err)
 			} else {
@@ -173,12 +182,12 @@ func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
 			}
 
 			// Start background refresh
-			handler.certFetcher.StartBackgroundRefresh(cfg.CertHost, cfg.CertPort)
+			h.certFetcher.StartBackgroundRefresh(cfg.CertHost, cfg.CertPort)
 		}
 
 		// Custom handler to capture engine
 		wrapper := &engineCaptureHandler{
-			ProxyHandler: handler,
+			ProxyHandler: h,
 			engPtr:       &engPtr,
 			ready:        ready,
 		}
@@ -210,6 +219,9 @@ func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
 		ch <- gnet.Run(wrapper, addr, opts...)
 	}()
 
+	// Wait for handler to be created (very fast, inside goroutine)
+	h := <-handlerCh
+
 	shutdownFn := func() {
 		// Wait for engine to be ready with a timeout
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -225,7 +237,7 @@ func Run(cfg *Config, logger Logger) (shutdown func(), errCh <-chan error) {
 		}
 	}
 
-	return shutdownFn, ch
+	return shutdownFn, h, ch
 }
 
 // engineCaptureHandler wraps ProxyHandler to capture the engine on boot.

@@ -131,13 +131,13 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	tlsSize := len(processData) + numRecords*faketls.RecordHeaderSize
 
 	// Get buffer from pool
-	tlsBufPtr := dcBufPool.Get().(*[]byte)
+	tlsBufPtr := h.dcBufPool.Get()
 	var tlsBuf []byte
 	if tlsSize <= len(*tlsBufPtr) {
 		tlsBuf = (*tlsBufPtr)[:tlsSize]
 	} else {
 		// Large data - allocate (rare)
-		dcBufPool.Put(tlsBufPtr)
+		h.dcBufPool.Put(tlsBufPtr)
 		tlsBufPtr = nil
 		tlsBuf = make([]byte, tlsSize)
 	}
@@ -172,7 +172,7 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	// Always use sync write - simpler and proven to work
 	_, err := clientConn.Write(tlsBuf)
 	if tlsBufPtr != nil {
-		dcBufPool.Put(tlsBufPtr)
+		h.dcBufPool.Put(tlsBufPtr)
 	}
 	if err != nil {
 		return gnet.Close

@@ -203,3 +203,29 @@ func (c *ConnContext) DCID() int {
 	defer c.mu.Unlock()
 	return c.dcID
 }
+
+// Cleanup zeros sensitive data in the connection context.
+// Should be called when the connection is closed.
+// Note: cipher.Stream internal state cannot be zeroed (opaque Go types).
+func (c *ConnContext) Cleanup() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Zero ClientHello sensitive fields
+	if c.clientHello != nil {
+		Zeroize(c.clientHello.SessionID)
+		ZeroizeArray32(&c.clientHello.Random)
+		c.clientHello = nil
+	}
+
+	// Zero pending data (may contain partial encrypted payload)
+	if c.pendingData != nil {
+		Zeroize(c.pendingData)
+		c.pendingData = nil
+	}
+
+	// Clear references (cipher streams can't be zeroed but break reference)
+	c.encryptor = nil
+	c.decryptor = nil
+	c.secret = nil
+}

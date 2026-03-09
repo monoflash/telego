@@ -188,7 +188,7 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 	dcEncrypt := relay.DCEncrypt
 
 	// Get buffer from pool for crypto operations
-	bufPtr := relayBufPool.Get().(*[]byte)
+	bufPtr := h.relayBufPool.Get()
 	buf := *bufPtr
 
 	// Handle data larger than pool buffer (rare)
@@ -197,7 +197,7 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 		decrypted = buf[:len(pendingData)]
 		copy(decrypted, pendingData)
 	} else {
-		relayBufPool.Put(bufPtr)
+		h.relayBufPool.Put(bufPtr)
 		bufPtr = nil
 		decrypted = make([]byte, len(pendingData))
 		copy(decrypted, pendingData)
@@ -214,7 +214,7 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 	// Write to DC - Write() copies so we can return buffer immediately
 	_, err := dcConn.Write(decrypted)
 	if bufPtr != nil {
-		relayBufPool.Put(bufPtr)
+		h.relayBufPool.Put(bufPtr)
 	}
 	if err != nil {
 		h.logger.Debug("failed to send pending data to DC: %v", err)

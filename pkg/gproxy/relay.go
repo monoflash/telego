@@ -2,36 +2,10 @@ package gproxy
 
 import (
 	"encoding/binary"
-	"sync"
 
 	"github.com/panjf2000/gnet/v2"
 
 	"github.com/scratch-net/telego/pkg/transport/faketls"
-)
-
-// Buffer size for batching - balances throughput vs memory
-// 64KB allows batching 4 TLS records (16KB each) while limiting memory per connection
-const relayBufSize = 64 * 1024 // 64KB for batching
-
-// Buffer pools for relay operations to avoid allocations in hot path
-var (
-	// relayBufPool for decrypt/encrypt buffers (up to 16KB TLS record)
-	relayBufPool = sync.Pool{
-		New: func() any {
-			buf := make([]byte, faketls.MaxRecordPayload)
-			return &buf
-		},
-	}
-
-	// dcBufPool for batching writes - 64KB for reduced syscalls
-	// Used for both Client->DC batching and DC->Client TLS wrapping
-	// Sized to hold 64KB data + TLS header overhead (5 bytes per 16KB = ~20 bytes)
-	dcBufPool = sync.Pool{
-		New: func() any {
-			buf := make([]byte, relayBufSize+256)
-			return &buf
-		},
-	}
 )
 
 // handleRelay processes data from the client and forwards to DC.
@@ -81,7 +55,7 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 	}
 
 	// Get pooled buffer for batching writes to DC
-	batchBufPtr := dcBufPool.Get().(*[]byte)
+	batchBufPtr := h.dcBufPool.Get()
 	batchBuf := *batchBufPtr
 
 	batchOffset := 0
@@ -95,6 +69,13 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 		recordType := data[0]
 		payloadLen := int(binary.BigEndian.Uint16(data[3:5]))
 		recordLen := faketls.RecordHeaderSize + payloadLen
+
+		// Check for desync (abnormally large frame indicates crypto state divergence)
+		if CheckFrameSize(payloadLen) {
+			h.desyncDetector.Report(ctx, payloadLen, "c2dc", h.logger)
+			h.dcBufPool.Put(batchBufPtr)
+			return gnet.Close
+		}
 
 		if len(data) < recordLen {
 			// Incomplete record, wait for more data
@@ -116,7 +97,7 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 				// Flush current batch
 				if batchOffset > 0 {
 					if _, err := dcConn.Write(batchBuf[:batchOffset]); err != nil {
-						dcBufPool.Put(batchBufPtr)
+						h.dcBufPool.Put(batchBufPtr)
 						return gnet.Close
 					}
 					batchOffset = 0
@@ -137,12 +118,12 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 	// Flush remaining batch - always use sync write
 	if batchOffset > 0 {
 		_, err := dcConn.Write(batchBuf[:batchOffset])
-		dcBufPool.Put(batchBufPtr)
+		h.dcBufPool.Put(batchBufPtr)
 		if err != nil {
 			return gnet.Close
 		}
 	} else {
-		dcBufPool.Put(batchBufPtr)
+		h.dcBufPool.Put(batchBufPtr)
 	}
 
 	// Only wake if we rate-limited and there's more data to process

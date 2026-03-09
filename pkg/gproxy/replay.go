@@ -3,116 +3,88 @@ package gproxy
 import (
 	"sync"
 	"time"
+
+	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 
 // Number of shards for striped locking - must be power of 2
-const numShards = 32
+const numShards = 64
+
+// replayShard wraps an expirable LRU with a mutex for atomic check-and-add.
+type replayShard struct {
+	mu    sync.Mutex
+	cache *expirable.LRU[string, struct{}]
+}
 
 // ReplayCache detects replay attacks by tracking seen session IDs.
-// Uses striped locking (32 shards) to reduce contention under high load.
+// Uses sharded expirable LRU caches for:
+//   - Proper LRU eviction (oldest entries removed first)
+//   - Automatic TTL expiration
+//   - Reduced lock contention (64 shards)
 type ReplayCache struct {
 	shards      [numShards]replayShard
-	maxSize     int
 	maxPerShard int
 	ttl         time.Duration
 }
 
-// replayShard is a single shard of the replay cache.
-type replayShard struct {
-	seen map[string]time.Time
-	mu   sync.RWMutex
-}
-
 // NewReplayCache creates a new replay cache.
+// maxSize is the total capacity across all shards.
+// ttl is how long entries are kept before automatic expiration.
 func NewReplayCache(maxSize int, ttl time.Duration) *ReplayCache {
+	maxPerShard := maxSize / numShards
+	if maxPerShard < 1 {
+		maxPerShard = 1
+	}
+
 	c := &ReplayCache{
-		maxSize:     maxSize,
-		maxPerShard: maxSize / numShards,
+		maxPerShard: maxPerShard,
 		ttl:         ttl,
 	}
 
-	// Initialize shards
+	// Initialize shards with expirable LRU caches
 	for i := range c.shards {
-		c.shards[i].seen = make(map[string]time.Time)
+		c.shards[i].cache = expirable.NewLRU[string, struct{}](maxPerShard, nil, ttl)
 	}
-
-	// Start cleanup goroutine
-	go c.cleanup()
 
 	return c
 }
 
-// getShard returns the shard for a given key using FNV-1a hash.
-func (c *ReplayCache) getShard(key string) *replayShard {
+// getShardIdx returns the shard index for a given key using FNV-1a hash.
+func (c *ReplayCache) getShardIdx(key string) int {
 	// FNV-1a hash - fast and good distribution
 	h := uint32(2166136261)
 	for i := 0; i < len(key); i++ {
 		h ^= uint32(key[i])
 		h *= 16777619
 	}
-	return &c.shards[h&(numShards-1)]
+	return int(h & (numShards - 1))
 }
 
-// Seen checks if the session ID was seen before.
-// Returns true if this is a replay, false if new.
+// Seen checks if the session ID was seen before and adds it if not.
+// Returns true if this is a replay attack, false if new.
+// This operation is atomic (check-and-add).
 func (c *ReplayCache) Seen(sessionID []byte) bool {
 	key := string(sessionID)
-	shard := c.getShard(key)
+	shard := &c.shards[c.getShardIdx(key)]
 
-	// Fast path: check if exists with read lock only
-	shard.mu.RLock()
-	_, exists := shard.seen[key]
-	shard.mu.RUnlock()
-
-	if exists {
-		return true
-	}
-
-	// Slow path: add with write lock
+	// Atomic check-and-add with shard lock
 	shard.mu.Lock()
-	// Double-check after acquiring write lock
-	if _, exists := shard.seen[key]; exists {
-		shard.mu.Unlock()
-		return true
+	exists := shard.cache.Contains(key)
+	if !exists {
+		shard.cache.Add(key, struct{}{})
 	}
-	shard.seen[key] = time.Now()
 	shard.mu.Unlock()
 
-	return false
+	return exists
 }
 
-// cleanup periodically removes expired entries from all shards.
-func (c *ReplayCache) cleanup() {
-	ticker := time.NewTicker(c.ttl / 2)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		now := time.Now()
-		for i := range c.shards {
-			shard := &c.shards[i]
-			shard.mu.Lock()
-
-			// Remove expired entries
-			for key, seen := range shard.seen {
-				if now.Sub(seen) > c.ttl {
-					delete(shard.seen, key)
-				}
-			}
-
-			// If shard too large, remove some entries
-			if len(shard.seen) > c.maxPerShard {
-				count := 0
-				target := len(shard.seen) / 2
-				for key := range shard.seen {
-					delete(shard.seen, key)
-					count++
-					if count >= target {
-						break
-					}
-				}
-			}
-
-			shard.mu.Unlock()
-		}
+// Len returns the total number of entries across all shards.
+func (c *ReplayCache) Len() int {
+	total := 0
+	for i := range c.shards {
+		c.shards[i].mu.Lock()
+		total += c.shards[i].cache.Len()
+		c.shards[i].mu.Unlock()
 	}
+	return total
 }
