@@ -85,14 +85,6 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 
 	clientBuffered := clientConn.OutboundBuffered()
 
-	// Hard limit - OOM protection
-	if clientBuffered > h.maxWriteBuffer {
-		h.logger.Warn("[%s] DC %d: client buffer exceeded %dMB (%dKB), closing slow client",
-			clientCtx.LogPrefix(), clientCtx.DCID(), h.maxWriteBuffer/1024/1024,
-			clientBuffered/1024)
-		return gnet.Close
-	}
-
 	data, _ := dcConn.Peek(-1)
 	if len(data) == 0 {
 		return gnet.None
@@ -103,14 +95,23 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	resumeAt := softLimit / 2         // 1MB - resume when below this
 
 	// Rate limiting: process less when buffer is filling up
+	// No hard disconnects - let TCP flow control + idle timeout handle stuck clients
 	maxProcess := len(data) // Default: full speed
-	if clientBuffered > softLimit {
+	if clientBuffered > h.maxWriteBuffer {
+		// Above hard limit: trickle mode - keep alive but minimal throughput
+		// TCP backpressure will naturally slow DC, idle timeout catches truly stuck clients
+		maxProcess = 16 * 1024
+		if maxProcess > len(data) {
+			maxProcess = len(data)
+		}
+		h.logger.Debug("[%s] backpressure: client buffer %dMB > hard limit, trickle mode",
+			clientCtx.LogPrefix(), clientBuffered/1024/1024)
+	} else if clientBuffered > softLimit {
 		// Above soft limit: small chunks only
 		maxProcess = 64 * 1024
 		if maxProcess > len(data) {
 			maxProcess = len(data)
 		}
-		// Debug level to avoid log spam - backpressure is normal for slow clients
 		h.logger.Debug("[%s] backpressure: client buffer %dKB > soft limit, throttling",
 			clientCtx.LogPrefix(), clientBuffered/1024)
 	} else if clientBuffered > resumeAt {

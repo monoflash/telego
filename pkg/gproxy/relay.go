@@ -50,14 +50,6 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 
 	dcBuffered := dcConn.OutboundBuffered()
 
-	// Hard limit - OOM protection
-	if dcBuffered > h.maxWriteBuffer {
-		h.logger.Warn("[%s] DC %d: DC buffer exceeded %dMB (%dKB), closing",
-			ctx.LogPrefix(), ctx.DCID(), h.maxWriteBuffer/1024/1024,
-			dcBuffered/1024)
-		return gnet.Close
-	}
-
 	data, _ := c.Peek(-1)
 	if len(data) < faketls.RecordHeaderSize {
 		return gnet.None
@@ -68,11 +60,16 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 	resumeAt := softLimit / 2         // 1MB - resume when below this
 
 	// Rate limiting: process less when buffer is filling up
+	// No hard disconnects - let TCP flow control + idle timeout handle stuck DCs
 	var maxProcess int
-	if dcBuffered > softLimit {
+	if dcBuffered > h.maxWriteBuffer {
+		// Above hard limit: trickle mode
+		maxProcess = 16 * 1024
+		h.logger.Debug("[%s] backpressure: DC buffer %dMB > hard limit, trickle mode",
+			ctx.LogPrefix(), dcBuffered/1024/1024)
+	} else if dcBuffered > softLimit {
 		// Above soft limit: small chunks only
 		maxProcess = 64 * 1024
-		// Debug level to avoid log spam - backpressure is normal under load
 		h.logger.Debug("[%s] backpressure: DC buffer %dKB > soft limit, throttling",
 			ctx.LogPrefix(), dcBuffered/1024)
 	} else if dcBuffered > resumeAt {
