@@ -138,9 +138,9 @@ func probeDC(dcID int, addrs []Addr) DCProbeResult {
 }
 
 // probeAddr probes a single address and returns the result.
+// When using SOCKS5, we measure actual round-trip by sending data and waiting
+// for response, since TCP handshake alone is handled locally by the proxy.
 func probeAddr(addr Addr) ProbeResult {
-	start := time.Now()
-
 	var conn net.Conn
 	var err error
 
@@ -167,11 +167,33 @@ func probeAddr(addr Addr) ProbeResult {
 			Error:   err.Error(),
 		}
 	}
-	conn.Close()
+	defer conn.Close()
+
+	// Measure actual data RTT by sending garbage handshake and waiting for DC response.
+	// This is more reliable than TCP handshake time, especially through proxies.
+	// Telegram DC will reject invalid handshake quickly, giving us real latency.
+	rttStart := time.Now()
+
+	// Send 64 bytes of garbage (looks like obfuscated2 handshake)
+	garbage := make([]byte, 64)
+	conn.SetWriteDeadline(time.Now().Add(ProbeTimeout))
+	if _, err := conn.Write(garbage); err != nil {
+		return ProbeResult{
+			Addr:    addr,
+			Success: false,
+			Error:   "write: " + err.Error(),
+		}
+	}
+
+	// Wait for DC to respond or close connection
+	// DC will either send error response or close - either gives us RTT
+	conn.SetReadDeadline(time.Now().Add(ProbeTimeout))
+	buf := make([]byte, 1)
+	conn.Read(buf) // ignore error - we just want to measure time until response/close
 
 	return ProbeResult{
 		Addr:    addr,
-		RTT:     time.Since(start),
+		RTT:     time.Since(rttStart),
 		Success: true,
 	}
 }

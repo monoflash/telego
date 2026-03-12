@@ -39,7 +39,9 @@
 ### Security
 - **TLS Fronting** — Fetches real certificates from mask host for perfect camouflage
 - **Probe Resistance** — Forwards unrecognized clients to mask host (indistinguishable from HTTPS)
-- **Replay Protection** — Sharded cache with 32 stripes for low-contention replay detection
+- **Replay Protection** — 64-shard LRU cache with TTL expiration ([hashicorp/golang-lru](https://github.com/hashicorp/golang-lru))
+- **Key Zeroization** — Sensitive data (session IDs, random bytes) zeroed on connection close
+- **Desync Detection** — Detects crypto state divergence via abnormal frame sizes
 - **Obfuscated2 + FakeTLS** — Full protocol support with streaming encryption
 
 ### Operations
@@ -47,6 +49,7 @@
 - **Connection Tracking** — Unique connection IDs for easy log correlation
 - **Connection Limits** — Per IP+secret limits using blake3 hashing with sharded maps
 - **DC Probing** — Automatic RTT-based DC address sorting at startup
+- **Config Hot-Reload** — SIGHUP and file watching for runtime config changes
 - **Graceful Shutdown** — Clean connection draining on SIGTERM/SIGINT
 - **Structured Logging** — JSON and text output with configurable levels
 
@@ -150,7 +153,7 @@ mask-host = "www.google.com"  # Host to mimic (SNI validation, proxy links)
 # Performance tuning (all optional)
 [performance]
 prefer-ip = "prefer-ipv4"    # prefer-ipv4, prefer-ipv6, only-ipv4, only-ipv6
-idle-timeout = "5m"          # Connection idle timeout
+idle-timeout = "5m"          # Connection idle timeout (hot-reloadable)
 num-event-loops = 0          # 0 = auto (all CPU cores)
 
 # Upstream (DC connection) settings
@@ -267,6 +270,26 @@ Service file is installed to `/etc/systemd/system/telego.service`.
 
 ---
 
+## Config Hot-Reload
+
+TeleGO supports runtime configuration reloading without restart:
+
+**Via SIGHUP:**
+```bash
+kill -HUP $(pidof telego)
+```
+
+**Automatic:** Config file changes are detected via fsnotify (Linux inotify).
+
+**Hot-reloadable fields:**
+- `log-level` — Applied immediately
+- `idle-timeout` — Applies to new connections
+
+**Require restart:**
+- `bind-to`, `secrets`, `tls-fronting.*`, `proxy-protocol`, `max-connections-per-ip`
+
+---
+
 ## Performance
 
 ### Benchmarks
@@ -284,11 +307,12 @@ Tested on Intel i9-12900K, Linux 6.6:
 
 ### Optimizations
 
-- **Striped locking** — 32-shard replay cache, 64-shard connection limiter
-- **Buffer pools** — 64KB DC buffers, 64KB read buffers, pooled blake3 hashers
+- **Striped locking** — 64-shard replay cache, 64-shard connection limiter
+- **Buffer pools** — 64KB DC buffers, 16KB TLS record buffers
 - **Zero-copy crypto** — XORKeyStream directly into output buffers
 - **Batched writes** — Multiple TLS records coalesced into single syscall
 - **Lock-free state** — Atomic state machine for connection handling
+- **Backpressure** — Flow control with soft/hard limits prevents OOM on slow clients
 
 ---
 
