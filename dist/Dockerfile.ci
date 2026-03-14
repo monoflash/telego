@@ -1,0 +1,19 @@
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -tags "poll_opt gc_opt" \
+    -ldflags "-s -w" \
+    -o /telego ./cmd/telego
+
+FROM scratch
+COPY --from=builder /telego /telego
+ENTRYPOINT ["/telego"]
+CMD ["run", "-c", "/config.toml"]
