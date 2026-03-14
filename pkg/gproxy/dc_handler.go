@@ -95,17 +95,16 @@ func (h *ProxyHandler) dialDirectDC(dcID int) (*directDCConn, error) {
 	// Get DC addresses (sorted by RTT if probing was done)
 	addrs, known := dc.GetProbedAddresses(dcID)
 
-	// Filter by IP preference
-	if h.config.IPPreference == dc.OnlyIPv4 || h.config.IPPreference == dc.OnlyIPv6 {
-		filtered := make([]dc.Addr, 0, len(addrs))
-		for _, a := range addrs {
-			if h.config.IPPreference == dc.OnlyIPv4 && !a.IsIPv6() {
-				filtered = append(filtered, a)
-			} else if h.config.IPPreference == dc.OnlyIPv6 && a.IsIPv6() {
-				filtered = append(filtered, a)
-			}
-		}
-		addrs = filtered
+	// Apply IP preference
+	switch h.config.IPPreference {
+	case dc.OnlyIPv4:
+		addrs = filterAddrs(addrs, false)
+	case dc.OnlyIPv6:
+		addrs = filterAddrs(addrs, true)
+	case dc.PreferIPv4:
+		addrs = sortAddrsByPreference(addrs, false)
+	case dc.PreferIPv6:
+		addrs = sortAddrsByPreference(addrs, true)
 	}
 
 	if !known {
@@ -417,4 +416,29 @@ func buildProxyProtocolV2(src, dst *net.TCPAddr) []byte {
 	copy(header[16:], addrs)
 
 	return header
+}
+
+// filterAddrs filters addresses by IP version.
+func filterAddrs(addrs []dc.Addr, wantIPv6 bool) []dc.Addr {
+	filtered := make([]dc.Addr, 0, len(addrs))
+	for _, a := range addrs {
+		if a.IsIPv6() == wantIPv6 {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered
+}
+
+// sortAddrsByPreference reorders addresses to prefer IPv4 or IPv6.
+// Preferred family comes first, maintaining relative RTT order within each group.
+func sortAddrsByPreference(addrs []dc.Addr, preferIPv6 bool) []dc.Addr {
+	var preferred, other []dc.Addr
+	for _, a := range addrs {
+		if a.IsIPv6() == preferIPv6 {
+			preferred = append(preferred, a)
+		} else {
+			other = append(other, a)
+		}
+	}
+	return append(preferred, other...)
 }

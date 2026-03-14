@@ -141,6 +141,16 @@ func probeDC(dcID int, addrs []Addr) DCProbeResult {
 // When using SOCKS5, we measure actual round-trip by sending data and waiting
 // for response, since TCP handshake alone is handled locally by the proxy.
 func probeAddr(addr Addr) ProbeResult {
+	// Skip IPv6 probing via SOCKS5 - many proxies don't support it properly
+	// and may return false positives (accept connection but can't route).
+	if probeDialer != nil && addr.IsIPv6() {
+		return ProbeResult{
+			Addr:    addr,
+			Success: false,
+			Error:   "skipped (IPv6 via SOCKS5 unreliable)",
+		}
+	}
+
 	var conn net.Conn
 	var err error
 
@@ -185,8 +195,8 @@ func probeAddr(addr Addr) ProbeResult {
 		}
 	}
 
-	// Wait for DC to respond or close connection
-	// DC will either send error response or close - either gives us RTT
+	// Wait for DC to respond or close connection.
+	// DC will either send error response or close - either gives us RTT.
 	conn.SetReadDeadline(time.Now().Add(ProbeTimeout))
 	buf := make([]byte, 1)
 	conn.Read(buf) // ignore error - we just want to measure time until response/close
