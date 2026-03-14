@@ -169,17 +169,29 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	// Discard what we processed
 	dcConn.Discard(len(processData))
 
-	// Always use sync write - simpler and proven to work
-	_, err := clientConn.Write(tlsBuf)
+	// Must use AsyncWrite for cross-event-loop writes.
+	// Sync Write() on error calls c.loop.close() from current goroutine,
+	// but c.loop is the SERVER event loop while we're on DC goroutine.
+	// This causes concurrent map writes in server's connMatrix.
+	// AsyncWrite queues to owning event loop via poller.Trigger().
+	var err error
 	if tlsBufPtr != nil {
-		h.dcBufPool.Put(tlsBufPtr)
+		poolRef := tlsBufPtr
+		err = clientConn.AsyncWrite(tlsBuf, func(_ gnet.Conn, _ error) error {
+			h.dcBufPool.Put(poolRef)
+			return nil
+		})
+		if err != nil {
+			h.dcBufPool.Put(poolRef)
+		}
+	} else {
+		err = clientConn.AsyncWrite(tlsBuf, nil)
 	}
 	if err != nil {
 		return gnet.Close
 	}
 
-	// If we rate-limited and there's more data, wake self to continue
-	// This keeps processing without cross-event-loop Wake issues
+	// If there's more data, wake self to continue
 	if dcConn.InboundBuffered() > 0 {
 		dcConn.Wake(nil)
 	}
