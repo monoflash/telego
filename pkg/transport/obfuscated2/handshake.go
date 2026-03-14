@@ -44,12 +44,12 @@ var reservedMagic = []uint32{
 type HandshakeFrame [FrameSize]byte
 
 // generateServerFrame creates a valid handshake frame for connecting to Telegram.
-func generateServerFrame(dc int) HandshakeFrame {
+func generateServerFrame(dc int) (HandshakeFrame, error) {
 	var frame HandshakeFrame
 
 	for {
 		if _, err := rand.Read(frame[:]); err != nil {
-			panic("crypto/rand failed: " + err.Error())
+			return frame, err
 		}
 
 		// Check reserved first byte
@@ -78,7 +78,7 @@ func generateServerFrame(dc int) HandshakeFrame {
 	// Set DC ID (little-endian int16) - can be negative for media DCs
 	binary.LittleEndian.PutUint16(frame[60:62], uint16(int16(dc)))
 
-	return frame
+	return frame, nil
 }
 
 // deriveKey derives an AES key from the secret and handshake data.
@@ -152,7 +152,10 @@ func ParseClientFrame(secret, frame []byte) (int, cipher.Stream, cipher.Stream, 
 // Returns the frame bytes and the encryption/decryption ciphers.
 // This is the buffer-based version of ServerHandshake for use with gnet.
 func GenerateServerFrame(dc int) ([]byte, cipher.Stream, cipher.Stream, error) {
-	frame := generateServerFrame(dc)
+	frame, err := generateServerFrame(dc)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	// Save original key and IV before encryption
 	origKey := make([]byte, 32)

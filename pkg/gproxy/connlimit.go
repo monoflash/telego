@@ -4,7 +4,6 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/zeebo/blake3"
 )
@@ -77,8 +76,7 @@ func (l *ConnLimiter) TryAcquire(ip net.IP, secret []byte) (key string, ok bool)
 		// First connection for this key
 		var initial int64 = 1
 		s.conns[keyArr] = &initial
-		// unsafe.String avoids allocation - keyArr is copied to s.conns so this is safe
-		return unsafe.String(&keyArr[0], limiterKeySize), true
+		return string(keyArr[:]), true
 	}
 
 	// Check limit before incrementing
@@ -89,7 +87,7 @@ func (l *ConnLimiter) TryAcquire(ip net.IP, secret []byte) (key string, ok bool)
 
 	// Increment counter
 	atomic.AddInt64(counter, 1)
-	return unsafe.String(&keyArr[0], limiterKeySize), true
+	return string(keyArr[:]), true
 }
 
 // Release releases a connection slot.
