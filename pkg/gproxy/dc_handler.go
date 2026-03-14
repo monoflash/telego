@@ -211,13 +211,21 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 		dcEncrypt.XORKeyStream(decrypted, decrypted)
 	}
 
-	// Write to DC - Write() copies so we can return buffer immediately
-	_, err := dcConn.Write(decrypted)
+	// Use AsyncWrite - this runs from dialDC goroutine, not dcClient event loop
 	if bufPtr != nil {
-		h.relayBufPool.Put(bufPtr)
-	}
-	if err != nil {
-		h.logger.Debug("failed to send pending data to DC: %v", err)
+		poolRef := bufPtr
+		err := dcConn.AsyncWrite(decrypted, func(_ gnet.Conn, _ error) error {
+			h.relayBufPool.Put(poolRef)
+			return nil
+		})
+		if err != nil {
+			h.relayBufPool.Put(poolRef)
+			h.logger.Debug("failed to send pending data to DC: %v", err)
+		}
+	} else {
+		if err := dcConn.AsyncWrite(decrypted, nil); err != nil {
+			h.logger.Debug("failed to send pending data to DC: %v", err)
+		}
 	}
 }
 
