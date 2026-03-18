@@ -78,6 +78,13 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	clientConn := dcCtx.ClientConn
 	clientCtx := dcCtx.ClientCtx
 
+	// Defensive: check all required fields are initialized
+	if clientConn == nil || clientCtx == nil || dcCtx.ClientEncrypt == nil || dcCtx.DCDecrypt == nil {
+		h.logger.Error("DC traffic with nil fields - closing (clientConn=%v, clientCtx=%v, encrypt=%v, decrypt=%v)",
+			clientConn != nil, clientCtx != nil, dcCtx.ClientEncrypt != nil, dcCtx.DCDecrypt != nil)
+		return gnet.Close
+	}
+
 	// Check client is still in relay state
 	if clientCtx.State() != StateRelaying {
 		return gnet.Close

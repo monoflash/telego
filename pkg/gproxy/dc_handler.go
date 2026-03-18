@@ -53,11 +53,8 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 		return
 	}
 
-	// Log with client IP (use real IP from PROXY protocol if available)
-	clientAddr := ctx.RealClientAddr(clientConn.RemoteAddr())
-	h.logger.Info("[#%d:%s] %s -> DC %d", ctx.id, userName, clientAddr, dcID)
-
-	// Set up DC connection context (for dcEventHandler.OnTraffic)
+	// Set up DC connection context IMMEDIATELY after Enroll to minimize race window.
+	// OnTraffic can fire as soon as Enroll completes if DC sends data quickly.
 	dcCtx := &DCConnContext{
 		ClientConn:    clientConn,
 		ClientCtx:     ctx,
@@ -67,6 +64,10 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 		DCConn:        dcGnetConn, // Self-reference for flow control wake
 	}
 	dcGnetConn.SetContext(dcCtx)
+
+	// Log with client IP (use real IP from PROXY protocol if available)
+	clientAddr := ctx.RealClientAddr(clientConn.RemoteAddr())
+	h.logger.Info("[#%d:%s] %s -> DC %d", ctx.id, userName, clientAddr, dcID)
 
 	// Build relay context for client -> DC direction
 	relay := &RelayContext{
