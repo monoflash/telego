@@ -36,6 +36,12 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 	ctx.pendingData = nil
 	ctx.mu.Unlock()
 
+	// Check if client already closed (Cleanup() nils ciphers)
+	if clientEncryptor == nil || clientDecryptor == nil {
+		h.logger.Debug("[#%d:%s] client closed before DC dial", ctx.id, userName)
+		return
+	}
+
 	// Direct DC connection (simple, reliable)
 	ddc, err := h.dialDirectDC(dcID)
 	if err != nil {
