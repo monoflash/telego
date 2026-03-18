@@ -148,6 +148,9 @@ func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 		return gnet.None
 	}
 
+	// Mark as closed FIRST - goroutines check this before proceeding
+	ctx.SetState(StateClosed)
+
 	// Close DC connection if active
 	if relay := ctx.Relay(); relay != nil && relay.DCConn != nil {
 		relay.DCConn.Close()

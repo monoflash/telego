@@ -78,8 +78,14 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	clientConn := dcCtx.ClientConn
 	clientCtx := dcCtx.ClientCtx
 
-	// Check client is still in relay state
-	if clientCtx.State() != StateRelaying {
+	// Check if client connection was closed
+	if clientCtx.State() == StateClosed {
+		return gnet.Close
+	}
+
+	// Defense in depth: should never be nil since dialDC checks under mutex.
+	// Kept as safety net against future bugs - costs nothing, prevents panic.
+	if dcCtx.ClientEncrypt == nil || dcCtx.DCDecrypt == nil {
 		return gnet.Close
 	}
 

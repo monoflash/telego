@@ -24,6 +24,10 @@ var spliceReadBufPool = sync.Pool{
 
 // dialDC establishes a direct connection to the Telegram DC.
 func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
+	// Read all needed state under mutex.
+	// Cleanup() also uses this mutex when nilling ciphers.
+	// Mutex guarantees: either we read valid values (Cleanup hasn't run),
+	// or we read nil (Cleanup already ran). No in-between state possible.
 	ctx.mu.Lock()
 	dcID := ctx.dcID
 	userName := ""
@@ -36,9 +40,9 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 	ctx.pendingData = nil
 	ctx.mu.Unlock()
 
-	// Check if client already closed (Cleanup() nils ciphers)
+	// If Cleanup() ran before we acquired the lock, ciphers are nil.
+	// If we acquired first, we have valid copies that Cleanup() can't affect.
 	if clientEncryptor == nil || clientDecryptor == nil {
-		h.logger.Debug("[#%d:%s] client closed before DC dial", ctx.id, userName)
 		return
 	}
 
@@ -47,6 +51,13 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 	if err != nil {
 		h.logger.Debug("[#%d:%s] failed to dial DC %d: %v", ctx.id, userName, dcID, err)
 		clientConn.Close()
+		return
+	}
+
+	// Optimization: skip setup if client closed during slow dial.
+	// Not required for correctness - handleDCTraffic would detect StateClosed anyway.
+	if ctx.State() == StateClosed {
+		ddc.Conn.Close()
 		return
 	}
 
@@ -237,6 +248,11 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 
 // dialSplice establishes a connection to the splice target.
 func (h *ProxyHandler) dialSplice(clientConn gnet.Conn, ctx *ConnContext) {
+	// Check if client already closed
+	if ctx.State() == StateClosed {
+		return
+	}
+
 	addr := fmt.Sprintf("%s:%d", h.config.SpliceHost, h.config.SplicePort)
 
 	dialer := netx.NewDialer()
@@ -244,6 +260,12 @@ func (h *ProxyHandler) dialSplice(clientConn gnet.Conn, ctx *ConnContext) {
 	if err != nil {
 		h.logger.Debug("failed to dial splice target %s: %v", addr, err)
 		clientConn.Close()
+		return
+	}
+
+	// Check again after slow dial
+	if ctx.State() == StateClosed {
+		conn.Close()
 		return
 	}
 
