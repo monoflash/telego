@@ -117,16 +117,14 @@ func TestReplayCache_MaxSize(t *testing.T) {
 	}
 
 	// The cache should handle this without panicking
-	// Count total entries across all shards
-	totalSize := 0
-	for i := range cache.shards {
-		cache.shards[i].mu.RLock()
-		totalSize += len(cache.shards[i].seen)
-		cache.shards[i].mu.RUnlock()
-	}
+	// With LRU eviction, size should stay around maxSize
+	totalSize := cache.Len()
 
-	// Size might exceed maxSize before cleanup runs
-	t.Logf("Cache size after %d inserts: %d across %d shards (max: %d)", maxSize*2, totalSize, numShards, maxSize)
+	// LRU should keep size around maxSize (may be slightly over due to per-shard limits)
+	t.Logf("Cache size after %d inserts: %d (max: %d)", maxSize*2, totalSize, maxSize)
+	if totalSize > maxSize*2 {
+		t.Errorf("Cache grew too large: %d > %d", totalSize, maxSize*2)
+	}
 }
 
 // TestReplayCache_Concurrent tests thread-safety under parallel access.
@@ -225,10 +223,6 @@ func TestNewReplayCache(t *testing.T) {
 		t.Fatal("NewReplayCache returned nil")
 	}
 
-	if cache.maxSize != 100 {
-		t.Errorf("maxSize: got %d, want 100", cache.maxSize)
-	}
-
 	if cache.maxPerShard != 100/numShards {
 		t.Errorf("maxPerShard: got %d, want %d", cache.maxPerShard, 100/numShards)
 	}
@@ -239,8 +233,8 @@ func TestNewReplayCache(t *testing.T) {
 
 	// Verify all shards are initialized
 	for i := range cache.shards {
-		if cache.shards[i].seen == nil {
-			t.Errorf("shard %d map is nil", i)
+		if cache.shards[i].cache == nil {
+			t.Errorf("shard %d cache is nil", i)
 		}
 	}
 }

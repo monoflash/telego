@@ -48,6 +48,13 @@ type ProxyHandler struct {
 
 	// Hard limit for OOM protection (bytes per connection)
 	maxWriteBuffer int
+
+	// Buffer pools with stats
+	dcBufPool    *BufferPool // 64KB+ for batching writes
+	relayBufPool *BufferPool // 16KB for TLS record processing
+
+	// Desync detector
+	desyncDetector *DesyncDetector
 }
 
 // NewProxyHandler creates a new gnet proxy handler.
@@ -67,6 +74,9 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 		replayCache:    NewReplayCache(1000000, 10*time.Minute),
 		logger:         logger,
 		maxWriteBuffer: maxWriteBuf,
+		dcBufPool:      NewBufferPool(64*1024 + 256), // 64KB + TLS header overhead
+		relayBufPool:   NewBufferPool(16 * 1024),     // 16KB TLS record
+		desyncDetector: NewDesyncDetector(),
 	}
 
 	// Initialize connection limiter if configured
@@ -78,6 +88,20 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 	logger.Info("OOM protection: max %dMB write buffer per connection", maxWriteBuf/1024/1024)
 
 	return h
+}
+
+// ApplyHotConfig applies hot-reloadable configuration changes.
+// Only certain fields can be changed at runtime; others require restart.
+// Hot-reloadable fields:
+//   - IdleTimeout: affects new connections only (existing keep their timeout)
+//
+// Non-hot fields (require restart):
+//   - BindAddr, Secrets, MaskHost/Port, ProxyProtocol, MaxConnectionsPerIP
+func (h *ProxyHandler) ApplyHotConfig(cfg *Config) {
+	// Update idle timeout - new connections will use this value
+	// Note: This is not atomic but safe since we're just updating duration value
+	// and readers don't need strict consistency (they get old or new value)
+	h.config.IdleTimeout = cfg.IdleTimeout
 }
 
 // OnBoot is called when the gnet engine starts.
@@ -124,6 +148,9 @@ func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 		return gnet.None
 	}
 
+	// Mark as closed FIRST - goroutines check this before proceeding
+	ctx.SetState(StateClosed)
+
 	// Close DC connection if active
 	if relay := ctx.Relay(); relay != nil && relay.DCConn != nil {
 		relay.DCConn.Close()
@@ -160,6 +187,9 @@ func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 	} else if isRealError {
 		h.logger.Debug("[%s] closed (%v): %v (active: %d)", prefix, duration.Round(time.Millisecond), err, conns)
 	}
+
+	// Zero sensitive data before releasing context
+	ctx.Cleanup()
 
 	return gnet.None
 }

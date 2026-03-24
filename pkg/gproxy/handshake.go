@@ -76,12 +76,10 @@ func (h *ProxyHandler) handleTLSPayload(c gnet.Conn, ctx *ConnContext) gnet.Acti
 		s := &h.config.Secrets[i]
 		parsed, err := faketls.ParseClientHello(s.Key, payload)
 		if err != nil {
-			h.logger.Debug("[#%d] secret %q parse failed: %v", ctx.id, s.Name, err)
 			continue
 		}
 		// Validate against this secret's hostname
 		if err := parsed.Valid(s.Host, h.config.TimeSkewTolerance); err != nil {
-			h.logger.Debug("[#%d] secret %q validation failed: %v (SNI=%q, expected=%q)", ctx.id, s.Name, err, parsed.Host, s.Host)
 			continue
 		}
 		hello = parsed

@@ -166,7 +166,10 @@ func TestGenerateServerFrame_AvoidReserved(t *testing.T) {
 
 	// Test the internal function that generates the frame before encryption
 	for range 1000 {
-		frame := generateServerFrame(2)
+		frame, err := generateServerFrame(2)
+		if err != nil {
+			t.Fatalf("generateServerFrame failed: %v", err)
+		}
 
 		// Check first byte isn't 0xef
 		if frame[0] == 0xef {
@@ -206,7 +209,10 @@ func TestGenerateServerFrame_DCEncoding(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run("dc_encoding", func(t *testing.T) {
 			// Test that generateServerFrame creates valid frame
-			frame := generateServerFrame(tc.dc)
+			frame, err := generateServerFrame(tc.dc)
+			if err != nil {
+				t.Fatalf("generateServerFrame failed: %v", err)
+			}
 
 			// DC ID is at offset 60-62 (before encryption)
 			// Note: frame is encrypted by GenerateServerFrame, so we test the internal function

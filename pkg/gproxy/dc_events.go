@@ -78,8 +78,14 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	clientConn := dcCtx.ClientConn
 	clientCtx := dcCtx.ClientCtx
 
-	// Check client is still in relay state
-	if clientCtx.State() != StateRelaying {
+	// Check if client connection was closed
+	if clientCtx.State() == StateClosed {
+		return gnet.Close
+	}
+
+	// Defense in depth: should never be nil since dialDC checks under mutex.
+	// Kept as safety net against future bugs - costs nothing, prevents panic.
+	if dcCtx.ClientEncrypt == nil || dcCtx.DCDecrypt == nil {
 		return gnet.Close
 	}
 
@@ -131,13 +137,13 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	tlsSize := len(processData) + numRecords*faketls.RecordHeaderSize
 
 	// Get buffer from pool
-	tlsBufPtr := dcBufPool.Get().(*[]byte)
+	tlsBufPtr := h.dcBufPool.Get()
 	var tlsBuf []byte
 	if tlsSize <= len(*tlsBufPtr) {
 		tlsBuf = (*tlsBufPtr)[:tlsSize]
 	} else {
 		// Large data - allocate (rare)
-		dcBufPool.Put(tlsBufPtr)
+		h.dcBufPool.Put(tlsBufPtr)
 		tlsBufPtr = nil
 		tlsBuf = make([]byte, tlsSize)
 	}
@@ -169,17 +175,29 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	// Discard what we processed
 	dcConn.Discard(len(processData))
 
-	// Always use sync write - simpler and proven to work
-	_, err := clientConn.Write(tlsBuf)
+	// Must use AsyncWrite for cross-event-loop writes.
+	// Sync Write() on error calls c.loop.close() from current goroutine,
+	// but c.loop is the SERVER event loop while we're on DC goroutine.
+	// This causes concurrent map writes in server's connMatrix.
+	// AsyncWrite queues to owning event loop via poller.Trigger().
+	var err error
 	if tlsBufPtr != nil {
-		dcBufPool.Put(tlsBufPtr)
+		poolRef := tlsBufPtr
+		err = clientConn.AsyncWrite(tlsBuf, func(_ gnet.Conn, _ error) error {
+			h.dcBufPool.Put(poolRef)
+			return nil
+		})
+		if err != nil {
+			h.dcBufPool.Put(poolRef)
+		}
+	} else {
+		err = clientConn.AsyncWrite(tlsBuf, nil)
 	}
 	if err != nil {
 		return gnet.Close
 	}
 
-	// If we rate-limited and there's more data, wake self to continue
-	// This keeps processing without cross-event-loop Wake issues
+	// If there's more data, wake self to continue
 	if dcConn.InboundBuffered() > 0 {
 		dcConn.Wake(nil)
 	}

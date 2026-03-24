@@ -95,14 +95,41 @@ func (c *RunCmd) Run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	shutdown, errCh := gproxy.Run(&cfg, &zerologAdapter{})
+	logger := &zerologAdapter{}
+	shutdown, handler, errCh := gproxy.RunWithHandler(&cfg, logger)
+
+	// Start hot reloader for config changes
+	hotReloader := gproxy.NewHotReloader(gproxy.HotReloadConfig{
+		ConfigPath: c.Config,
+		LoadConfig: func() (*gproxy.Config, string, error) {
+			fileCfg, err := config.Load(c.Config)
+			if err != nil {
+				return nil, "", err
+			}
+			proxyCfg, err := fileCfg.ToGProxyConfig()
+			if err != nil {
+				return nil, "", err
+			}
+			logLevel := fileCfg.General.LogLevel
+			if logLevel == "" {
+				logLevel = fileCfg.LogLevel
+			}
+			return &proxyCfg, logLevel, nil
+		},
+		Handler:  handler,
+		Logger:   logger,
+		SetLogFn: log.SetLevel,
+	})
+	hotReloader.Start()
 
 	select {
 	case sig := <-sigCh:
 		log.Info().Str("signal", sig.String()).Msg("shutting down")
+		hotReloader.Stop()
 		shutdown()
 		return nil
 	case err := <-errCh:
+		hotReloader.Stop()
 		return err
 	}
 }

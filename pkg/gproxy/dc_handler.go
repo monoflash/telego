@@ -24,6 +24,10 @@ var spliceReadBufPool = sync.Pool{
 
 // dialDC establishes a direct connection to the Telegram DC.
 func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
+	// Read all needed state under mutex.
+	// Cleanup() also uses this mutex when nilling ciphers.
+	// Mutex guarantees: either we read valid values (Cleanup hasn't run),
+	// or we read nil (Cleanup already ran). No in-between state possible.
 	ctx.mu.Lock()
 	dcID := ctx.dcID
 	userName := ""
@@ -36,11 +40,24 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 	ctx.pendingData = nil
 	ctx.mu.Unlock()
 
+	// If Cleanup() ran before we acquired the lock, ciphers are nil.
+	// If we acquired first, we have valid copies that Cleanup() can't affect.
+	if clientEncryptor == nil || clientDecryptor == nil {
+		return
+	}
+
 	// Direct DC connection (simple, reliable)
 	ddc, err := h.dialDirectDC(dcID)
 	if err != nil {
 		h.logger.Debug("[#%d:%s] failed to dial DC %d: %v", ctx.id, userName, dcID, err)
 		clientConn.Close()
+		return
+	}
+
+	// Optimization: skip setup if client closed during slow dial.
+	// Not required for correctness - handleDCTraffic would detect StateClosed anyway.
+	if ctx.State() == StateClosed {
+		ddc.Conn.Close()
 		return
 	}
 
@@ -53,11 +70,8 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 		return
 	}
 
-	// Log with client IP (use real IP from PROXY protocol if available)
-	clientAddr := ctx.RealClientAddr(clientConn.RemoteAddr())
-	h.logger.Info("[#%d:%s] %s -> DC %d", ctx.id, userName, clientAddr, dcID)
-
-	// Set up DC connection context (for dcEventHandler.OnTraffic)
+	// Set up DC connection context IMMEDIATELY after Enroll to minimize race window.
+	// OnTraffic can fire as soon as Enroll completes if DC sends data quickly.
 	dcCtx := &DCConnContext{
 		ClientConn:    clientConn,
 		ClientCtx:     ctx,
@@ -67,6 +81,10 @@ func (h *ProxyHandler) dialDC(clientConn gnet.Conn, ctx *ConnContext) {
 		DCConn:        dcGnetConn, // Self-reference for flow control wake
 	}
 	dcGnetConn.SetContext(dcCtx)
+
+	// Log with client IP (use real IP from PROXY protocol if available)
+	clientAddr := ctx.RealClientAddr(clientConn.RemoteAddr())
+	h.logger.Info("[#%d:%s] %s -> DC %d", ctx.id, userName, clientAddr, dcID)
 
 	// Build relay context for client -> DC direction
 	relay := &RelayContext{
@@ -95,17 +113,16 @@ func (h *ProxyHandler) dialDirectDC(dcID int) (*directDCConn, error) {
 	// Get DC addresses (sorted by RTT if probing was done)
 	addrs, known := dc.GetProbedAddresses(dcID)
 
-	// Filter by IP preference
-	if h.config.IPPreference == dc.OnlyIPv4 || h.config.IPPreference == dc.OnlyIPv6 {
-		filtered := make([]dc.Addr, 0, len(addrs))
-		for _, a := range addrs {
-			if h.config.IPPreference == dc.OnlyIPv4 && !a.IsIPv6() {
-				filtered = append(filtered, a)
-			} else if h.config.IPPreference == dc.OnlyIPv6 && a.IsIPv6() {
-				filtered = append(filtered, a)
-			}
-		}
-		addrs = filtered
+	// Apply IP preference
+	switch h.config.IPPreference {
+	case dc.OnlyIPv4:
+		addrs = filterAddrs(addrs, false)
+	case dc.OnlyIPv6:
+		addrs = filterAddrs(addrs, true)
+	case dc.PreferIPv4:
+		addrs = sortAddrsByPreference(addrs, false)
+	case dc.PreferIPv6:
+		addrs = sortAddrsByPreference(addrs, true)
 	}
 
 	if !known {
@@ -188,7 +205,7 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 	dcEncrypt := relay.DCEncrypt
 
 	// Get buffer from pool for crypto operations
-	bufPtr := relayBufPool.Get().(*[]byte)
+	bufPtr := h.relayBufPool.Get()
 	buf := *bufPtr
 
 	// Handle data larger than pool buffer (rare)
@@ -197,7 +214,7 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 		decrypted = buf[:len(pendingData)]
 		copy(decrypted, pendingData)
 	} else {
-		relayBufPool.Put(bufPtr)
+		h.relayBufPool.Put(bufPtr)
 		bufPtr = nil
 		decrypted = make([]byte, len(pendingData))
 		copy(decrypted, pendingData)
@@ -211,18 +228,31 @@ func (h *ProxyHandler) sendPendingDataGnet(dcConn gnet.Conn, relay *RelayContext
 		dcEncrypt.XORKeyStream(decrypted, decrypted)
 	}
 
-	// Write to DC - Write() copies so we can return buffer immediately
-	_, err := dcConn.Write(decrypted)
+	// Use AsyncWrite - this runs from dialDC goroutine, not dcClient event loop
 	if bufPtr != nil {
-		relayBufPool.Put(bufPtr)
-	}
-	if err != nil {
-		h.logger.Debug("failed to send pending data to DC: %v", err)
+		poolRef := bufPtr
+		err := dcConn.AsyncWrite(decrypted, func(_ gnet.Conn, _ error) error {
+			h.relayBufPool.Put(poolRef)
+			return nil
+		})
+		if err != nil {
+			h.relayBufPool.Put(poolRef)
+			h.logger.Debug("failed to send pending data to DC: %v", err)
+		}
+	} else {
+		if err := dcConn.AsyncWrite(decrypted, nil); err != nil {
+			h.logger.Debug("failed to send pending data to DC: %v", err)
+		}
 	}
 }
 
 // dialSplice establishes a connection to the splice target.
 func (h *ProxyHandler) dialSplice(clientConn gnet.Conn, ctx *ConnContext) {
+	// Check if client already closed
+	if ctx.State() == StateClosed {
+		return
+	}
+
 	addr := fmt.Sprintf("%s:%d", h.config.SpliceHost, h.config.SplicePort)
 
 	dialer := netx.NewDialer()
@@ -230,6 +260,12 @@ func (h *ProxyHandler) dialSplice(clientConn gnet.Conn, ctx *ConnContext) {
 	if err != nil {
 		h.logger.Debug("failed to dial splice target %s: %v", addr, err)
 		clientConn.Close()
+		return
+	}
+
+	// Check again after slow dial
+	if ctx.State() == StateClosed {
+		conn.Close()
 		return
 	}
 
@@ -409,4 +445,29 @@ func buildProxyProtocolV2(src, dst *net.TCPAddr) []byte {
 	copy(header[16:], addrs)
 
 	return header
+}
+
+// filterAddrs filters addresses by IP version.
+func filterAddrs(addrs []dc.Addr, wantIPv6 bool) []dc.Addr {
+	filtered := make([]dc.Addr, 0, len(addrs))
+	for _, a := range addrs {
+		if a.IsIPv6() == wantIPv6 {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered
+}
+
+// sortAddrsByPreference reorders addresses to prefer IPv4 or IPv6.
+// Preferred family comes first, maintaining relative RTT order within each group.
+func sortAddrsByPreference(addrs []dc.Addr, preferIPv6 bool) []dc.Addr {
+	var preferred, other []dc.Addr
+	for _, a := range addrs {
+		if a.IsIPv6() == preferIPv6 {
+			preferred = append(preferred, a)
+		} else {
+			other = append(other, a)
+		}
+	}
+	return append(preferred, other...)
 }
