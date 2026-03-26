@@ -17,14 +17,18 @@ const (
 
 	// Secret key size (16 bytes)
 	secretKeySize = 16
+
+	// Max IPs to track per user when limiting is disabled (for stats only)
+	statsOnlyMaxIPs = 10000
 )
 
-// UserIPLimiter limits unique IPs per user (secret).
+// UserIPLimiter tracks per-user statistics and optionally limits unique IPs per user.
 // Uses sharded maps and LRU caches for minimal contention.
 type UserIPLimiter struct {
-	maxIPsPerUser int
-	blockTimeout  time.Duration
-	shards        [userLimiterShards]userLimiterShard
+	maxIPsPerUser   int
+	blockTimeout    time.Duration
+	limitingEnabled bool
+	shards          [userLimiterShards]userLimiterShard
 }
 
 type userLimiterShard struct {
@@ -37,10 +41,10 @@ type userIPState struct {
 	// Secret name for metrics labeling
 	secretName string
 
-	// Active IPs with connection count (LRU, size = maxIPsPerUser)
+	// Active IPs with connection count (LRU)
 	activeIPs *lru.Cache[string, *int64]
 
-	// Blocked IPs (expirable LRU with TTL)
+	// Blocked IPs (expirable LRU with TTL) - nil when limiting disabled
 	blockedIPs *expirable.LRU[string, struct{}]
 
 	// Traffic counters (read via atomic, updated in hot path)
@@ -50,9 +54,9 @@ type userIPState struct {
 	// Block event counter
 	blockedTotal atomic.Int64
 
-	// Reference to parent for eviction callback
-	parent       *UserIPLimiter
-	blockTimeout time.Duration
+	// Whether this user state has limiting enabled
+	limitingEnabled bool
+	blockTimeout    time.Duration
 }
 
 // UserIPStats contains statistics for a single user.
@@ -68,16 +72,13 @@ type UserIPStats struct {
 	BlockedTotal  int64
 }
 
-// NewUserIPLimiter creates a new user IP limiter.
-// Returns nil if maxIPsPerUser <= 0 (limiting disabled).
+// NewUserIPLimiter creates a new user IP limiter/stats tracker.
+// If maxIPsPerUser <= 0, limiting is disabled but stats are still tracked.
 func NewUserIPLimiter(maxIPsPerUser int, blockTimeout time.Duration) *UserIPLimiter {
-	if maxIPsPerUser <= 0 {
-		return nil
-	}
-
 	l := &UserIPLimiter{
-		maxIPsPerUser: maxIPsPerUser,
-		blockTimeout:  blockTimeout,
+		maxIPsPerUser:   maxIPsPerUser,
+		blockTimeout:    blockTimeout,
+		limitingEnabled: maxIPsPerUser > 0,
 	}
 
 	for i := range l.shards {
@@ -85,6 +86,14 @@ func NewUserIPLimiter(maxIPsPerUser int, blockTimeout time.Duration) *UserIPLimi
 	}
 
 	return l
+}
+
+// LimitingEnabled returns whether IP limiting is active.
+func (l *UserIPLimiter) LimitingEnabled() bool {
+	if l == nil {
+		return false
+	}
+	return l.limitingEnabled
 }
 
 // getShardIdx returns shard index for a secret key.
@@ -105,25 +114,34 @@ func (l *UserIPLimiter) getOrCreateUserState(shard *userLimiterShard, secretKey 
 
 	// Create new user state
 	state = &userIPState{
-		secretName:   secretName,
-		parent:       l,
-		blockTimeout: l.blockTimeout,
+		secretName:      secretName,
+		limitingEnabled: l.limitingEnabled,
+		blockTimeout:    l.blockTimeout,
 	}
 
-	// Create active IPs LRU with eviction callback
-	activeIPs, _ := lru.NewWithEvict[string, *int64](l.maxIPsPerUser, func(ip string, _ *int64) {
-		// Move evicted IP to blocked list
-		state.blockedIPs.Add(ip, struct{}{})
-		state.blockedTotal.Add(1)
-	})
-	state.activeIPs = activeIPs
+	if l.limitingEnabled {
+		// Limiting mode: use configured max with eviction callback
+		activeIPs, _ := lru.NewWithEvict[string, *int64](l.maxIPsPerUser, func(ip string, _ *int64) {
+			// Move evicted IP to blocked list
+			if state.blockedIPs != nil {
+				state.blockedIPs.Add(ip, struct{}{})
+				state.blockedTotal.Add(1)
+			}
+		})
+		state.activeIPs = activeIPs
 
-	// Create blocked IPs expirable LRU
-	state.blockedIPs = expirable.NewLRU[string, struct{}](
-		l.maxIPsPerUser*10, // Allow tracking more blocked IPs
-		nil,
-		l.blockTimeout,
-	)
+		// Create blocked IPs expirable LRU
+		state.blockedIPs = expirable.NewLRU[string, struct{}](
+			l.maxIPsPerUser*10, // Allow tracking more blocked IPs
+			nil,
+			l.blockTimeout,
+		)
+	} else {
+		// Stats-only mode: large LRU for tracking, no blocking
+		activeIPs, _ := lru.New[string, *int64](statsOnlyMaxIPs)
+		state.activeIPs = activeIPs
+		// blockedIPs stays nil - no blocking in stats-only mode
+	}
 
 	shard.users[secretKey] = state
 	return state
@@ -132,6 +150,7 @@ func (l *UserIPLimiter) getOrCreateUserState(shard *userLimiterShard, secretKey 
 // TryAcquire attempts to acquire a connection slot for the given IP+secret.
 // Returns the key (for Release) and success status.
 // secretName is used for metrics labeling.
+// When limiting is disabled, always succeeds but still tracks stats.
 func (l *UserIPLimiter) TryAcquire(ip net.IP, secret []byte, secretName string) (key string, ok bool) {
 	if l == nil || len(secret) < secretKeySize {
 		return "", true // Disabled or invalid secret
@@ -150,8 +169,8 @@ func (l *UserIPLimiter) TryAcquire(ip net.IP, secret []byte, secretName string) 
 
 	state := l.getOrCreateUserState(shard, secretKey, secretName)
 
-	// Check if IP is blocked
-	if state.blockedIPs.Contains(ipStr) {
+	// Check if IP is blocked (only when limiting is enabled)
+	if state.limitingEnabled && state.blockedIPs != nil && state.blockedIPs.Contains(ipStr) {
 		// Refresh TTL by re-adding
 		state.blockedIPs.Add(ipStr, struct{}{})
 		return "", false
@@ -165,7 +184,7 @@ func (l *UserIPLimiter) TryAcquire(ip net.IP, secret []byte, secretName string) 
 		return string(secretKey[:]) + ipStr, true
 	}
 
-	// New IP - add to active (may trigger eviction of oldest)
+	// New IP - add to active (may trigger eviction of oldest when limiting)
 	var count int64 = 1
 	state.activeIPs.Add(ipStr, &count)
 
@@ -251,12 +270,15 @@ func (l *UserIPLimiter) Stats() []UserIPStats {
 				}
 			}
 
-			blockedKeys := state.blockedIPs.Keys()
+			var blockedKeys []string
+			if state.blockedIPs != nil {
+				blockedKeys = state.blockedIPs.Keys()
+			}
 
 			stats = append(stats, UserIPStats{
 				SecretName:    state.secretName,
 				ActiveIPs:     state.activeIPs.Len(),
-				BlockedIPs:    state.blockedIPs.Len(),
+				BlockedIPs:    len(blockedKeys),
 				ActiveIPList:  activeKeys,
 				BlockedIPList: blockedKeys,
 				Connections:   totalConns,
@@ -284,7 +306,9 @@ func (l *UserIPLimiter) Close() {
 		shard := &l.shards[i]
 		shard.mu.Lock()
 		for _, state := range shard.users {
-			state.blockedIPs.Purge()
+			if state.blockedIPs != nil {
+				state.blockedIPs.Purge()
+			}
 		}
 		shard.mu.Unlock()
 	}

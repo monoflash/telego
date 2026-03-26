@@ -79,10 +79,12 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 		desyncDetector: NewDesyncDetector(),
 	}
 
-	// Initialize user IP limiter if configured
-	if cfg.MaxIPsPerUser > 0 {
-		h.userLimiter = NewUserIPLimiter(cfg.MaxIPsPerUser, cfg.IPBlockTimeout)
+	// Initialize user IP limiter/stats tracker (always created for metrics)
+	h.userLimiter = NewUserIPLimiter(cfg.MaxIPsPerUser, cfg.IPBlockTimeout)
+	if h.userLimiter.LimitingEnabled() {
 		logger.Info("User IP limiter enabled: max %d IPs per user, block timeout %v", cfg.MaxIPsPerUser, cfg.IPBlockTimeout)
+	} else {
+		logger.Info("User IP stats tracking enabled (limiting disabled)")
 	}
 
 	logger.Info("OOM protection: max %dMB write buffer per connection", maxWriteBuf/1024/1024)

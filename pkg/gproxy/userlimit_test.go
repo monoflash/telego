@@ -134,11 +134,51 @@ func TestUserIPLimiter_PerUserIsolation(t *testing.T) {
 	}
 }
 
-func TestUserIPLimiter_Disabled(t *testing.T) {
-	l := NewUserIPLimiter(0, 5*time.Minute) // 0 = disabled
-	if l != nil {
-		t.Fatal("Limiter should be nil when disabled")
+func TestUserIPLimiter_StatsOnlyMode(t *testing.T) {
+	l := NewUserIPLimiter(0, 5*time.Minute) // 0 = stats-only mode
+	defer l.Close()
+
+	if l == nil {
+		t.Fatal("Limiter should not be nil in stats-only mode")
 	}
+	if l.LimitingEnabled() {
+		t.Fatal("Limiting should be disabled in stats-only mode")
+	}
+
+	secret := []byte("0123456789abcdef")
+	ip1 := net.ParseIP("192.168.1.1")
+	ip2 := net.ParseIP("192.168.1.2")
+	ip3 := net.ParseIP("192.168.1.3")
+
+	// All IPs should succeed (no limiting)
+	key1, ok := l.TryAcquire(ip1, secret, "test")
+	if !ok {
+		t.Fatal("IP1 should succeed in stats-only mode")
+	}
+	key2, ok := l.TryAcquire(ip2, secret, "test")
+	if !ok {
+		t.Fatal("IP2 should succeed in stats-only mode")
+	}
+	key3, ok := l.TryAcquire(ip3, secret, "test")
+	if !ok {
+		t.Fatal("IP3 should succeed in stats-only mode")
+	}
+
+	// Stats should be tracked
+	stats := l.Stats()
+	if len(stats) != 1 {
+		t.Fatalf("Expected 1 user stat, got %d", len(stats))
+	}
+	if stats[0].ActiveIPs != 3 {
+		t.Errorf("ActiveIPs = %d, want 3", stats[0].ActiveIPs)
+	}
+	if stats[0].BlockedIPs != 0 {
+		t.Errorf("BlockedIPs = %d, want 0 (no blocking in stats-only)", stats[0].BlockedIPs)
+	}
+
+	l.Release(key1)
+	l.Release(key2)
+	l.Release(key3)
 }
 
 func TestUserIPLimiter_BlockExpires(t *testing.T) {
