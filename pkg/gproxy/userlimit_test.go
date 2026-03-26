@@ -285,9 +285,48 @@ func TestUserIPLimiter_Stats(t *testing.T) {
 		t.Errorf("Connections = %d, want 3", s.Connections)
 	}
 
+	// Verify IP lists are populated
+	if len(s.ActiveIPList) != 2 {
+		t.Errorf("ActiveIPList len = %d, want 2", len(s.ActiveIPList))
+	}
+	if len(s.BlockedIPList) != 0 {
+		t.Errorf("BlockedIPList len = %d, want 0", len(s.BlockedIPList))
+	}
+
 	l.Release(key1)
 	l.Release(key2)
 	l.Release(key3)
+}
+
+func TestUserIPLimiter_StatsWithBlockedIPs(t *testing.T) {
+	l := NewUserIPLimiter(2, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip1 := net.ParseIP("192.168.1.1")
+	ip2 := net.ParseIP("192.168.1.2")
+	ip3 := net.ParseIP("192.168.1.3")
+
+	// Fill up and cause eviction
+	l.TryAcquire(ip1, secret, "testuser")
+	l.TryAcquire(ip2, secret, "testuser")
+	l.TryAcquire(ip3, secret, "testuser") // Evicts ip1
+
+	stats := l.Stats()
+	if len(stats) != 1 {
+		t.Fatalf("Expected 1 user stat, got %d", len(stats))
+	}
+
+	s := stats[0]
+	if len(s.ActiveIPList) != 2 {
+		t.Errorf("ActiveIPList len = %d, want 2", len(s.ActiveIPList))
+	}
+	if len(s.BlockedIPList) != 1 {
+		t.Errorf("BlockedIPList len = %d, want 1", len(s.BlockedIPList))
+	}
+	if s.BlockedIPList[0] != "192.168.1.1" {
+		t.Errorf("BlockedIPList[0] = %q, want 192.168.1.1", s.BlockedIPList[0])
+	}
 }
 
 // Benchmarks

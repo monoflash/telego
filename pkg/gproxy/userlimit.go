@@ -57,13 +57,15 @@ type userIPState struct {
 
 // UserIPStats contains statistics for a single user.
 type UserIPStats struct {
-	SecretName   string
-	ActiveIPs    int
-	BlockedIPs   int
-	Connections  int64
-	BytesIn      int64
-	BytesOut     int64
-	BlockedTotal int64
+	SecretName    string
+	ActiveIPs     int
+	BlockedIPs    int
+	ActiveIPList  []string // List of active IP addresses
+	BlockedIPList []string // List of currently blocked IP addresses
+	Connections   int64
+	BytesIn       int64
+	BytesOut      int64
+	BlockedTotal  int64
 }
 
 // NewUserIPLimiter creates a new user IP limiter.
@@ -242,21 +244,25 @@ func (l *UserIPLimiter) Stats() []UserIPStats {
 
 		for _, state := range shard.users {
 			var totalConns int64
-			keys := state.activeIPs.Keys()
-			for _, ip := range keys {
+			activeKeys := state.activeIPs.Keys()
+			for _, ip := range activeKeys {
 				if countPtr, ok := state.activeIPs.Peek(ip); ok {
 					totalConns += atomic.LoadInt64(countPtr)
 				}
 			}
 
+			blockedKeys := state.blockedIPs.Keys()
+
 			stats = append(stats, UserIPStats{
-				SecretName:   state.secretName,
-				ActiveIPs:    state.activeIPs.Len(),
-				BlockedIPs:   state.blockedIPs.Len(),
-				Connections:  totalConns,
-				BytesIn:      state.bytesIn.Load(),
-				BytesOut:     state.bytesOut.Load(),
-				BlockedTotal: state.blockedTotal.Load(),
+				SecretName:    state.secretName,
+				ActiveIPs:     state.activeIPs.Len(),
+				BlockedIPs:    state.blockedIPs.Len(),
+				ActiveIPList:  activeKeys,
+				BlockedIPList: blockedKeys,
+				Connections:   totalConns,
+				BytesIn:       state.bytesIn.Load(),
+				BytesOut:      state.bytesOut.Load(),
+				BlockedTotal:  state.blockedTotal.Load(),
 			})
 		}
 
