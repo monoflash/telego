@@ -2,10 +2,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
-	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,6 +16,7 @@ import (
 	"github.com/scratch-net/telego/pkg/config"
 	"github.com/scratch-net/telego/pkg/gproxy"
 	"github.com/scratch-net/telego/pkg/log"
+	"github.com/scratch-net/telego/pkg/metrics"
 )
 
 // CLI defines the command-line interface.
@@ -75,16 +75,6 @@ func (c *RunCmd) Run() error {
 		}
 	}
 
-	// Start pprof server if configured (for memory debugging)
-	if fileCfg.Performance.PprofAddr != "" {
-		go func() {
-			log.Info().Str("addr", fileCfg.Performance.PprofAddr).Msg("pprof server started")
-			if err := http.ListenAndServe(fileCfg.Performance.PprofAddr, nil); err != nil {
-				log.Warn().Err(err).Msg("pprof server failed")
-			}
-		}()
-	}
-
 	log.Info().
 		Str("bind", cfg.BindAddr).
 		Int("secrets", len(cfg.Secrets)).
@@ -97,6 +87,25 @@ func (c *RunCmd) Run() error {
 
 	logger := &zerologAdapter{}
 	shutdown, handler, errCh := gproxy.RunWithHandler(&cfg, logger)
+
+	// Start metrics server if configured
+	var metricsServer *metrics.Server
+	if fileCfg.Metrics.BindTo != "" {
+		var err error
+		metricsServer, err = metrics.NewServer(metrics.Config{
+			BindAddr: fileCfg.Metrics.BindTo,
+			Path:     fileCfg.Metrics.Path,
+		}, handler.UserLimiter())
+		if err != nil {
+			log.Error().Err(err).Msg("failed to create metrics server")
+		} else {
+			if err := metricsServer.Start(); err != nil {
+				log.Error().Err(err).Msg("failed to start metrics server")
+			} else {
+				log.Info().Str("addr", fileCfg.Metrics.BindTo).Msg("metrics server started")
+			}
+		}
+	}
 
 	// Start hot reloader for config changes
 	hotReloader := gproxy.NewHotReloader(gproxy.HotReloadConfig{
@@ -125,10 +134,20 @@ func (c *RunCmd) Run() error {
 	select {
 	case sig := <-sigCh:
 		log.Info().Str("signal", sig.String()).Msg("shutting down")
+		if metricsServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			metricsServer.Shutdown(shutdownCtx)
+			cancel()
+		}
 		hotReloader.Stop()
 		shutdown()
 		return nil
 	case err := <-errCh:
+		if metricsServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			metricsServer.Shutdown(shutdownCtx)
+			cancel()
+		}
 		hotReloader.Stop()
 		return err
 	}

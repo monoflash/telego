@@ -112,8 +112,8 @@ func (h *ProxyHandler) handleTLSPayload(c gnet.Conn, ctx *ConnContext) gnet.Acti
 	ctx.secret = matchedSecret
 	ctx.mu.Unlock()
 
-	// Check connection limit (if enabled)
-	if h.connLimiter != nil {
+	// Check user IP limit (if enabled)
+	if h.userLimiter != nil {
 		clientAddr := ctx.RealClientAddr(c.RemoteAddr())
 		var clientIP net.IP
 		if tcpAddr, ok := clientAddr.(*net.TCPAddr); ok {
@@ -123,9 +123,9 @@ func (h *ProxyHandler) handleTLSPayload(c gnet.Conn, ctx *ConnContext) gnet.Acti
 		}
 
 		if clientIP != nil {
-			key, ok := h.connLimiter.TryAcquire(clientIP, matchedSecret.Key)
+			key, ok := h.userLimiter.TryAcquire(clientIP, matchedSecret.Key, matchedSecret.Name)
 			if !ok {
-				h.logger.Debug("[#%d:%s] connection limit exceeded for %s", ctx.id, matchedSecret.Name, clientIP)
+				h.logger.Debug("[#%d:%s] IP blocked for user (too many unique IPs): %s", ctx.id, matchedSecret.Name, clientIP)
 				return gnet.Close
 			}
 			// Store tracking info for cleanup in OnClose
@@ -133,6 +133,10 @@ func (h *ProxyHandler) handleTLSPayload(c gnet.Conn, ctx *ConnContext) gnet.Acti
 			ctx.limitTracked = true
 			ctx.limitKey = key
 			ctx.mu.Unlock()
+
+			// Store traffic counter pointers for hot-path counting
+			bytesIn, bytesOut := h.userLimiter.TrafficCounters(matchedSecret.Key)
+			ctx.SetTrafficCounters(bytesIn, bytesOut)
 		}
 	}
 

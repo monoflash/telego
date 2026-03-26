@@ -111,6 +111,10 @@ type ConnContext struct {
 	limitTracked bool   // Whether this connection is tracked in limiter
 	limitKey     string // Cached key for limiter release
 
+	// Traffic counters (pointers to user's atomic counters)
+	trafficIn  *atomic.Int64
+	trafficOut *atomic.Int64
+
 	// Timing
 	connTime time.Time
 }
@@ -228,4 +232,27 @@ func (c *ConnContext) Cleanup() {
 	c.encryptor = nil
 	c.decryptor = nil
 	c.secret = nil
+}
+
+// SetTrafficCounters sets the traffic counter pointers for this connection.
+// Must be called during handshake before entering relay state.
+func (c *ConnContext) SetTrafficCounters(bytesIn, bytesOut *atomic.Int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.trafficIn = bytesIn
+	c.trafficOut = bytesOut
+}
+
+// TrafficIn returns the traffic-in counter (may be nil).
+// Safe to call without lock because SetTrafficCounters is called during
+// handshake and getters are only called during relay state (after handshake).
+func (c *ConnContext) TrafficIn() *atomic.Int64 {
+	return c.trafficIn
+}
+
+// TrafficOut returns the traffic-out counter (may be nil).
+// Safe to call without lock because SetTrafficCounters is called during
+// handshake and getters are only called during relay state (after handshake).
+func (c *ConnContext) TrafficOut() *atomic.Int64 {
+	return c.trafficOut
 }

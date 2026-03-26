@@ -15,9 +15,12 @@ log-level = "info"
 # When enabled, parses PROXY protocol v1/v2 to get real client IP
 # proxy-protocol = false
 
-# Maximum concurrent connections per IP+secret combination
-# Prevents single IP from consuming all resources (0 = unlimited)
-# max-connections-per-ip = 10
+# Maximum unique IP addresses per user/secret (0 = unlimited)
+# When exceeded, oldest IP is blocked. Protects against leaked account abuse.
+# max-ips-per-user = 3
+
+# How long blocked IPs stay blocked (with refresh on attempts)
+# ip-block-timeout = "5m"
 
 # Named secrets (32 hex characters = 16 bytes)
 # Generate with: telego generate <hostname>
@@ -73,3 +76,11 @@ num-event-loops = 0
 # SOCKS5 proxy for Telegram DC connections
 # Useful for routing through VPN/tunnel (e.g., Hysteria2, VLESS)
 # socks5 = "127.0.0.1:1080"
+
+# Prometheus metrics endpoint (optional)
+[metrics]
+# Address to bind metrics server (empty = disabled)
+# bind-to = "127.0.0.1:9090"
+
+# Metrics path (default: /metrics)
+# path = "/metrics"
