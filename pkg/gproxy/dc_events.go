@@ -132,6 +132,11 @@ func (h *ProxyHandler) handleDCTraffic(dcConn gnet.Conn, dcCtx *DCConnContext) g
 	// Limit data to what we'll process
 	processData := data[:maxProcess]
 
+	// Count traffic (DC -> client = download/out)
+	if counter := clientCtx.TrafficOut(); counter != nil {
+		counter.Add(int64(len(processData)))
+	}
+
 	// Calculate TLS output size
 	numRecords := (len(processData) + faketls.MaxRecordPayload - 1) / faketls.MaxRecordPayload
 	tlsSize := len(processData) + numRecords*faketls.RecordHeaderSize

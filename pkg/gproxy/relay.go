@@ -118,6 +118,11 @@ func (h *ProxyHandler) handleRelay(c gnet.Conn, ctx *ConnContext) gnet.Action {
 			dcEncrypt.XORKeyStream(batchBuf[batchOffset:batchOffset+len(payload)], batchBuf[batchOffset:batchOffset+len(payload)])
 			batchOffset += len(payload)
 			processed += len(payload)
+
+			// Count traffic (client -> DC = upload/in)
+			if counter := ctx.TrafficIn(); counter != nil {
+				counter.Add(int64(len(payload)))
+			}
 		}
 
 		consumed += recordLen

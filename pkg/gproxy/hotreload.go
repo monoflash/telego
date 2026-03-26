@@ -200,9 +200,9 @@ func (r *HotReloader) warnNonHotChanges(old, new *Config) {
 		r.logger.Warn("proxy-protocol setting changed but requires restart")
 	}
 
-	if old.MaxConnectionsPerIP != new.MaxConnectionsPerIP {
-		r.logger.Warn("max-connections-per-ip changed (%d -> %d) but requires restart",
-			old.MaxConnectionsPerIP, new.MaxConnectionsPerIP)
+	if old.MaxIPsPerUser != new.MaxIPsPerUser {
+		r.logger.Warn("max-ips-per-user changed (%d -> %d) but requires restart",
+			old.MaxIPsPerUser, new.MaxIPsPerUser)
 	}
 
 	if old.NumEventLoop != new.NumEventLoop {

@@ -478,7 +478,7 @@ func TestLoad_GeneralSection(t *testing.T) {
 bind-to = "0.0.0.0:8443"
 log-level = "debug"
 proxy-protocol = true
-max-connections-per-ip = 10
+max-ips-per-user = 10
 
 [secrets]
 main = "0123456789abcdef0123456789abcdef"
@@ -510,8 +510,8 @@ mask-host = "www.google.com"
 		t.Error("General.ProxyProtocol should be true")
 	}
 
-	if cfg.General.MaxConnectionsPerIP != 10 {
-		t.Errorf("General.MaxConnectionsPerIP: got %d, want 10", cfg.General.MaxConnectionsPerIP)
+	if cfg.General.MaxIPsPerUser != 10 {
+		t.Errorf("General.MaxIPsPerUser: got %d, want 10", cfg.General.MaxIPsPerUser)
 	}
 
 	// Test ToGProxyConfig uses [general] values
@@ -528,8 +528,8 @@ mask-host = "www.google.com"
 		t.Error("gCfg.ProxyProtocol should be true")
 	}
 
-	if gCfg.MaxConnectionsPerIP != 10 {
-		t.Errorf("gCfg.MaxConnectionsPerIP: got %d, want 10", gCfg.MaxConnectionsPerIP)
+	if gCfg.MaxIPsPerUser != 10 {
+		t.Errorf("gCfg.MaxIPsPerUser: got %d, want 10", gCfg.MaxIPsPerUser)
 	}
 }
 
@@ -571,5 +571,86 @@ mask-host = "www.google.com"
 	// [general] should take precedence
 	if gCfg.BindAddr != "0.0.0.0:8443" {
 		t.Errorf("gCfg.BindAddr: got %q, want %q (from [general])", gCfg.BindAddr, "0.0.0.0:8443")
+	}
+}
+
+// TestParseMetricsConfig tests parsing new max-ips-per-user and metrics config.
+func TestParseMetricsConfig(t *testing.T) {
+	content := `
+[general]
+bind-to = "0.0.0.0:443"
+max-ips-per-user = 3
+ip-block-timeout = "5m"
+
+[secrets]
+test = "0123456789abcdef0123456789abcdef"
+
+[tls-fronting]
+mask-host = "www.google.com"
+
+[metrics]
+bind-to = "127.0.0.1:9090"
+path = "/metrics"
+`
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.General.MaxIPsPerUser != 3 {
+		t.Errorf("MaxIPsPerUser = %d, want 3", cfg.General.MaxIPsPerUser)
+	}
+	if cfg.General.IPBlockTimeout.Duration() != 5*time.Minute {
+		t.Errorf("IPBlockTimeout = %v, want 5m", cfg.General.IPBlockTimeout.Duration())
+	}
+	if cfg.Metrics.BindTo != "127.0.0.1:9090" {
+		t.Errorf("Metrics.BindTo = %q, want 127.0.0.1:9090", cfg.Metrics.BindTo)
+	}
+	if cfg.Metrics.Path != "/metrics" {
+		t.Errorf("Metrics.Path = %q, want /metrics", cfg.Metrics.Path)
+	}
+}
+
+// TestConfigDefaults_MaxIPsPerUser tests default values for new config fields.
+func TestConfigDefaults_MaxIPsPerUser(t *testing.T) {
+	content := `
+[general]
+bind-to = "0.0.0.0:443"
+
+[secrets]
+test = "0123456789abcdef0123456789abcdef"
+
+[tls-fronting]
+mask-host = "www.google.com"
+`
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proxyCfg, err := cfg.ToGProxyConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Default: unlimited (0)
+	if proxyCfg.MaxIPsPerUser != 0 {
+		t.Errorf("MaxIPsPerUser = %d, want 0", proxyCfg.MaxIPsPerUser)
+	}
+	// Default: 5m
+	if proxyCfg.IPBlockTimeout != 5*time.Minute {
+		t.Errorf("IPBlockTimeout = %v, want 5m", proxyCfg.IPBlockTimeout)
 	}
 }

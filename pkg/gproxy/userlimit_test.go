@@ -1,0 +1,358 @@
+package gproxy
+
+import (
+	"fmt"
+	"net"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestUserIPLimiter_UnlimitedConnectionsPerIP(t *testing.T) {
+	l := NewUserIPLimiter(3, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip := net.ParseIP("192.168.1.1")
+
+	// Same IP should allow unlimited connections
+	var keys []string
+	for i := 0; i < 100; i++ {
+		key, ok := l.TryAcquire(ip, secret, "test")
+		if !ok {
+			t.Fatalf("TryAcquire failed at iteration %d", i)
+		}
+		keys = append(keys, key)
+	}
+
+	// Release all
+	for _, key := range keys {
+		l.Release(key)
+	}
+}
+
+func TestUserIPLimiter_MaxIPsPerUser(t *testing.T) {
+	l := NewUserIPLimiter(3, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip1 := net.ParseIP("192.168.1.1")
+	ip2 := net.ParseIP("192.168.1.2")
+	ip3 := net.ParseIP("192.168.1.3")
+	ip4 := net.ParseIP("192.168.1.4")
+
+	// First 3 IPs should succeed
+	key1, ok := l.TryAcquire(ip1, secret, "test")
+	if !ok {
+		t.Fatal("IP1 should succeed")
+	}
+	key2, ok := l.TryAcquire(ip2, secret, "test")
+	if !ok {
+		t.Fatal("IP2 should succeed")
+	}
+	key3, ok := l.TryAcquire(ip3, secret, "test")
+	if !ok {
+		t.Fatal("IP3 should succeed")
+	}
+
+	// 4th IP should succeed (evicts IP1)
+	key4, ok := l.TryAcquire(ip4, secret, "test")
+	if !ok {
+		t.Fatal("IP4 should succeed (evicting IP1)")
+	}
+
+	// IP1 should now be blocked
+	_, ok = l.TryAcquire(ip1, secret, "test")
+	if ok {
+		t.Fatal("IP1 should be blocked after eviction")
+	}
+
+	// Release all
+	l.Release(key1)
+	l.Release(key2)
+	l.Release(key3)
+	l.Release(key4)
+}
+
+func TestUserIPLimiter_BlockedIPRejected(t *testing.T) {
+	l := NewUserIPLimiter(2, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip1 := net.ParseIP("192.168.1.1")
+	ip2 := net.ParseIP("192.168.1.2")
+	ip3 := net.ParseIP("192.168.1.3")
+
+	// Fill up with IP1 and IP2
+	l.TryAcquire(ip1, secret, "test")
+	l.TryAcquire(ip2, secret, "test")
+
+	// IP3 evicts IP1
+	l.TryAcquire(ip3, secret, "test")
+
+	// Multiple attempts from blocked IP1 should fail
+	for i := 0; i < 5; i++ {
+		_, ok := l.TryAcquire(ip1, secret, "test")
+		if ok {
+			t.Fatalf("Blocked IP should be rejected (attempt %d)", i)
+		}
+	}
+}
+
+func TestUserIPLimiter_PerUserIsolation(t *testing.T) {
+	l := NewUserIPLimiter(2, 5*time.Minute)
+	defer l.Close()
+
+	secret1 := []byte("0123456789abcdef")
+	secret2 := []byte("fedcba9876543210")
+	ip := net.ParseIP("192.168.1.1")
+
+	// Same IP for different users should both succeed
+	_, ok := l.TryAcquire(ip, secret1, "user1")
+	if !ok {
+		t.Fatal("User1 should succeed")
+	}
+	_, ok = l.TryAcquire(ip, secret2, "user2")
+	if !ok {
+		t.Fatal("User2 should succeed with same IP")
+	}
+
+	// Fill up user1's IP slots
+	ip2 := net.ParseIP("192.168.1.2")
+	ip3 := net.ParseIP("192.168.1.3")
+	l.TryAcquire(ip2, secret1, "user1")
+	l.TryAcquire(ip3, secret1, "user1") // Evicts ip for user1
+
+	// IP should be blocked for user1 but still work for user2
+	_, ok = l.TryAcquire(ip, secret1, "user1")
+	if ok {
+		t.Fatal("IP should be blocked for user1")
+	}
+	_, ok = l.TryAcquire(ip, secret2, "user2")
+	if !ok {
+		t.Fatal("IP should still work for user2")
+	}
+}
+
+func TestUserIPLimiter_Disabled(t *testing.T) {
+	l := NewUserIPLimiter(0, 5*time.Minute) // 0 = disabled
+	if l != nil {
+		t.Fatal("Limiter should be nil when disabled")
+	}
+}
+
+func TestUserIPLimiter_BlockExpires(t *testing.T) {
+	// Use short timeout for testing
+	l := NewUserIPLimiter(2, 100*time.Millisecond)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip1 := net.ParseIP("192.168.1.1")
+	ip2 := net.ParseIP("192.168.1.2")
+	ip3 := net.ParseIP("192.168.1.3")
+
+	// Fill up and evict ip1
+	l.TryAcquire(ip1, secret, "test")
+	l.TryAcquire(ip2, secret, "test")
+	l.TryAcquire(ip3, secret, "test") // Evicts ip1
+
+	// ip1 should be blocked
+	_, ok := l.TryAcquire(ip1, secret, "test")
+	if ok {
+		t.Fatal("IP1 should be blocked")
+	}
+
+	// Wait for block to expire
+	time.Sleep(150 * time.Millisecond)
+
+	// ip1 should now be allowed (will evict ip2)
+	_, ok = l.TryAcquire(ip1, secret, "test")
+	if !ok {
+		t.Fatal("IP1 should be allowed after block expires")
+	}
+}
+
+func TestUserIPLimiter_BlockTimeoutRefresh(t *testing.T) {
+	l := NewUserIPLimiter(2, 100*time.Millisecond)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip1 := net.ParseIP("192.168.1.1")
+	ip2 := net.ParseIP("192.168.1.2")
+	ip3 := net.ParseIP("192.168.1.3")
+
+	// Fill up and evict ip1
+	l.TryAcquire(ip1, secret, "test")
+	l.TryAcquire(ip2, secret, "test")
+	l.TryAcquire(ip3, secret, "test")
+
+	// Keep refreshing block by attempting connection
+	for i := 0; i < 3; i++ {
+		time.Sleep(60 * time.Millisecond)
+		_, ok := l.TryAcquire(ip1, secret, "test")
+		if ok {
+			t.Fatalf("IP1 should still be blocked at iteration %d", i)
+		}
+	}
+
+	// Total time: 180ms of refreshes, block should still be active
+	// because each attempt refreshes the TTL
+}
+
+func TestUserIPLimiter_ConcurrentAccess(t *testing.T) {
+	l := NewUserIPLimiter(10, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			ip := net.ParseIP(fmt.Sprintf("192.168.1.%d", n%10))
+			for j := 0; j < 100; j++ {
+				key, ok := l.TryAcquire(ip, secret, "test")
+				if ok {
+					l.Release(key)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestUserIPLimiter_TrafficCounters(t *testing.T) {
+	l := NewUserIPLimiter(3, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip := net.ParseIP("192.168.1.1")
+
+	// Acquire to create user state
+	key, _ := l.TryAcquire(ip, secret, "test")
+	defer l.Release(key)
+
+	// Get traffic counters
+	bytesIn, bytesOut := l.TrafficCounters(secret)
+	if bytesIn == nil || bytesOut == nil {
+		t.Fatal("Traffic counters should not be nil")
+	}
+
+	// Simulate traffic
+	bytesIn.Add(1000)
+	bytesOut.Add(2000)
+
+	// Verify via Stats
+	stats := l.Stats()
+	if len(stats) != 1 {
+		t.Fatalf("Expected 1 user stat, got %d", len(stats))
+	}
+	if stats[0].BytesIn != 1000 {
+		t.Errorf("BytesIn = %d, want 1000", stats[0].BytesIn)
+	}
+	if stats[0].BytesOut != 2000 {
+		t.Errorf("BytesOut = %d, want 2000", stats[0].BytesOut)
+	}
+}
+
+func TestUserIPLimiter_Stats(t *testing.T) {
+	l := NewUserIPLimiter(3, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip1 := net.ParseIP("192.168.1.1")
+	ip2 := net.ParseIP("192.168.1.2")
+
+	// Create some connections
+	key1, _ := l.TryAcquire(ip1, secret, "testuser")
+	key2, _ := l.TryAcquire(ip1, secret, "testuser")
+	key3, _ := l.TryAcquire(ip2, secret, "testuser")
+
+	stats := l.Stats()
+	if len(stats) != 1 {
+		t.Fatalf("Expected 1 user stat, got %d", len(stats))
+	}
+
+	s := stats[0]
+	if s.SecretName != "testuser" {
+		t.Errorf("SecretName = %q, want testuser", s.SecretName)
+	}
+	if s.ActiveIPs != 2 {
+		t.Errorf("ActiveIPs = %d, want 2", s.ActiveIPs)
+	}
+	if s.Connections != 3 {
+		t.Errorf("Connections = %d, want 3", s.Connections)
+	}
+
+	l.Release(key1)
+	l.Release(key2)
+	l.Release(key3)
+}
+
+// Benchmarks
+
+func BenchmarkUserIPLimiter_TryAcquire(b *testing.B) {
+	l := NewUserIPLimiter(100, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip := net.ParseIP("192.168.1.1")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l.TryAcquire(ip, secret, "test")
+	}
+}
+
+func BenchmarkUserIPLimiter_TryAcquireRelease(b *testing.B) {
+	l := NewUserIPLimiter(100, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ip := net.ParseIP("192.168.1.1")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key, _ := l.TryAcquire(ip, secret, "test")
+		l.Release(key)
+	}
+}
+
+func BenchmarkUserIPLimiter_Parallel(b *testing.B) {
+	l := NewUserIPLimiter(100, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		ip := net.ParseIP("192.168.1.1")
+		for pb.Next() {
+			key, ok := l.TryAcquire(ip, secret, "test")
+			if ok {
+				l.Release(key)
+			}
+		}
+	})
+}
+
+func BenchmarkUserIPLimiter_MultipleIPs(b *testing.B) {
+	l := NewUserIPLimiter(100, 5*time.Minute)
+	defer l.Close()
+
+	secret := []byte("0123456789abcdef")
+	ips := make([]net.IP, 10)
+	for i := range ips {
+		ips[i] = net.ParseIP(fmt.Sprintf("192.168.1.%d", i))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ip := ips[i%len(ips)]
+		key, ok := l.TryAcquire(ip, secret, "test")
+		if ok {
+			l.Release(key)
+		}
+	}
+}

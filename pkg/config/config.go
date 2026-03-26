@@ -19,10 +19,9 @@ import (
 // Config is the TOML configuration structure.
 type Config struct {
 	// Top-level options (can also be set in [general] section)
-	BindTo              string `toml:"bind-to"`
-	LogLevel            string `toml:"log-level"`
-	ProxyProtocol       bool   `toml:"proxy-protocol"`
-	MaxConnectionsPerIP int    `toml:"max-connections-per-ip"`
+	BindTo        string `toml:"bind-to"`
+	LogLevel      string `toml:"log-level"`
+	ProxyProtocol bool   `toml:"proxy-protocol"`
 
 	Secrets map[string]string `toml:"secrets"` // name = "secret"
 
@@ -30,14 +29,16 @@ type Config struct {
 	TLSFronting TLSFrontingConfig `toml:"tls-fronting"`
 	Performance PerformanceConfig `toml:"performance"`
 	Upstream    UpstreamConfig    `toml:"upstream"`
+	Metrics     MetricsConfig     `toml:"metrics"`
 }
 
 // GeneralConfig contains general server settings.
 type GeneralConfig struct {
-	BindTo              string `toml:"bind-to"`
-	LogLevel            string `toml:"log-level"`              // trace, debug, info, warn, error
-	ProxyProtocol       bool   `toml:"proxy-protocol"`         // Accept incoming PROXY protocol
-	MaxConnectionsPerIP int    `toml:"max-connections-per-ip"` // Per IP+secret, 0 = unlimited
+	BindTo         string   `toml:"bind-to"`
+	LogLevel       string   `toml:"log-level"`        // trace, debug, info, warn, error
+	ProxyProtocol  bool     `toml:"proxy-protocol"`   // Accept incoming PROXY protocol
+	MaxIPsPerUser  int      `toml:"max-ips-per-user"` // Max unique IPs per user, 0 = unlimited
+	IPBlockTimeout Duration `toml:"ip-block-timeout"` // How long blocked IPs stay blocked
 }
 
 // TLSFrontingConfig configures TLS fronting.
@@ -65,12 +66,17 @@ type PerformanceConfig struct {
 	PreferIP         string   `toml:"prefer-ip"`
 	IdleTimeout      Duration `toml:"idle-timeout"`
 	MaxWriteBufferMB int      `toml:"max-write-buffer-mb"` // Max pending bytes per connection (0 = 4MB)
-	PprofAddr        string   `toml:"pprof-addr"`          // e.g. "localhost:6060" for memory profiling
 }
 
 // UpstreamConfig configures upstream (DC) connection settings.
 type UpstreamConfig struct {
 	Socks5 string `toml:"socks5"` // SOCKS5 proxy address (e.g., "127.0.0.1:1080")
+}
+
+// MetricsConfig configures the Prometheus metrics endpoint.
+type MetricsConfig struct {
+	BindTo string `toml:"bind-to"` // Address to bind metrics server (empty = disabled)
+	Path   string `toml:"path"`    // Metrics path (default: /metrics)
 }
 
 // Duration is a TOML-parseable duration.
@@ -196,11 +202,12 @@ func (c *Config) ToGProxyConfig() (gproxy.Config, error) {
 	// Upstream settings
 	cfg.Socks5Addr = c.Upstream.Socks5
 
-	// General settings ([general] takes precedence over top-level)
+	// General settings
 	cfg.ProxyProtocol = c.General.ProxyProtocol || c.ProxyProtocol
-	cfg.MaxConnectionsPerIP = c.General.MaxConnectionsPerIP
-	if cfg.MaxConnectionsPerIP == 0 {
-		cfg.MaxConnectionsPerIP = c.MaxConnectionsPerIP
+	cfg.MaxIPsPerUser = c.General.MaxIPsPerUser
+	cfg.IPBlockTimeout = c.General.IPBlockTimeout.Duration()
+	if cfg.IPBlockTimeout == 0 {
+		cfg.IPBlockTimeout = 5 * time.Minute
 	}
 
 	// Backpressure settings

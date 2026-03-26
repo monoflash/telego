@@ -34,8 +34,8 @@ type ProxyHandler struct {
 	// Replay cache for anti-replay protection
 	replayCache *ReplayCache
 
-	// Connection limiter (nil if disabled)
-	connLimiter *ConnLimiter
+	// User IP limiter (nil if disabled)
+	userLimiter *UserIPLimiter
 
 	// TLS fronting
 	certFetcher *tlsfront.CertFetcher
@@ -79,10 +79,10 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 		desyncDetector: NewDesyncDetector(),
 	}
 
-	// Initialize connection limiter if configured
-	if cfg.MaxConnectionsPerIP > 0 {
-		h.connLimiter = NewConnLimiter(cfg.MaxConnectionsPerIP)
-		logger.Info("Connection limiter enabled: max %d per IP+secret", cfg.MaxConnectionsPerIP)
+	// Initialize user IP limiter if configured
+	if cfg.MaxIPsPerUser > 0 {
+		h.userLimiter = NewUserIPLimiter(cfg.MaxIPsPerUser, cfg.IPBlockTimeout)
+		logger.Info("User IP limiter enabled: max %d IPs per user, block timeout %v", cfg.MaxIPsPerUser, cfg.IPBlockTimeout)
 	}
 
 	logger.Info("OOM protection: max %dMB write buffer per connection", maxWriteBuf/1024/1024)
@@ -96,12 +96,17 @@ func NewProxyHandler(cfg *Config, logger Logger) *ProxyHandler {
 //   - IdleTimeout: affects new connections only (existing keep their timeout)
 //
 // Non-hot fields (require restart):
-//   - BindAddr, Secrets, MaskHost/Port, ProxyProtocol, MaxConnectionsPerIP
+//   - BindAddr, Secrets, MaskHost/Port, ProxyProtocol, MaxIPsPerUser
 func (h *ProxyHandler) ApplyHotConfig(cfg *Config) {
 	// Update idle timeout - new connections will use this value
 	// Note: This is not atomic but safe since we're just updating duration value
 	// and readers don't need strict consistency (they get old or new value)
 	h.config.IdleTimeout = cfg.IdleTimeout
+}
+
+// UserLimiter returns the user IP limiter for metrics access.
+func (h *ProxyHandler) UserLimiter() *UserIPLimiter {
+	return h.userLimiter
 }
 
 // OnBoot is called when the gnet engine starts.
@@ -164,8 +169,8 @@ func (h *ProxyHandler) OnClose(c gnet.Conn, err error) gnet.Action {
 	// Release connection limit slot and check if authenticated
 	ctx.mu.Lock()
 	authenticated := ctx.secret != nil
-	if ctx.limitTracked && h.connLimiter != nil {
-		h.connLimiter.Release(ctx.limitKey)
+	if ctx.limitTracked && h.userLimiter != nil {
+		h.userLimiter.Release(ctx.limitKey)
 		ctx.limitTracked = false
 	}
 	ctx.mu.Unlock()

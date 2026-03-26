@@ -47,7 +47,8 @@
 ### Operations
 - **Multi-user Support** — Named secrets with per-user tracking and logging
 - **Connection Tracking** — Unique connection IDs for easy log correlation
-- **Connection Limits** — Per IP+secret limits using blake3 hashing with sharded maps
+- **IP Limits per User** — Limits unique IPs per user with LRU eviction and timed blocking
+- **Prometheus Metrics** — Per-user connection counts, traffic, and blocked IP statistics
 - **DC Probing** — Automatic RTT-based DC address sorting at startup
 - **Config Hot-Reload** — SIGHUP and file watching for runtime config changes
 - **Graceful Shutdown** — Clean connection draining on SIGTERM/SIGINT
@@ -131,8 +132,11 @@ log-level = "info"
 # Accept incoming PROXY protocol headers (from HAProxy/nginx)
 # proxy-protocol = false
 
-# Maximum connections per IP+secret (0 = unlimited)
-# max-connections-per-ip = 10
+# Maximum unique IPs per user (0 = unlimited)
+# max-ips-per-user = 3
+
+# How long blocked IPs stay blocked
+# ip-block-timeout = "5m"
 
 # Named secrets (hex format, 32 chars = 16 bytes)
 # Generate with: telego generate <hostname>
@@ -159,6 +163,11 @@ num-event-loops = 0          # 0 = auto (all CPU cores)
 # Upstream (DC connection) settings
 [upstream]
 # socks5 = "127.0.0.1:1080"  # Route DC traffic through SOCKS5 proxy
+
+# Prometheus metrics (optional)
+[metrics]
+# bind-to = "127.0.0.1:9090"  # Metrics endpoint (empty = disabled)
+# path = "/metrics"           # Metrics path
 ```
 
 ---
@@ -225,7 +234,7 @@ TeleGO can run behind HAProxy or nginx using Unix sockets and PROXY protocol:
 [general]
 bind-to = "/run/telego/telego.sock"
 proxy-protocol = true
-max-connections-per-ip = 10
+max-ips-per-user = 3
 
 [secrets]
 user1 = "..."
@@ -286,7 +295,7 @@ kill -HUP $(pidof telego)
 - `idle-timeout` — Applies to new connections
 
 **Require restart:**
-- `bind-to`, `secrets`, `tls-fronting.*`, `proxy-protocol`, `max-connections-per-ip`
+- `bind-to`, `secrets`, `tls-fronting.*`, `proxy-protocol`, `max-ips-per-user`
 
 ---
 
@@ -307,7 +316,7 @@ Tested on Intel i9-12900K, Linux 6.6:
 
 ### Optimizations
 
-- **Striped locking** — 64-shard replay cache, 64-shard connection limiter
+- **Striped locking** — 64-shard replay cache, 64-shard user IP limiter
 - **Buffer pools** — 64KB DC buffers, 16KB TLS record buffers
 - **Zero-copy crypto** — XORKeyStream directly into output buffers
 - **Batched writes** — Multiple TLS records coalesced into single syscall
@@ -322,7 +331,7 @@ Connections are tracked with unique IDs for easy correlation:
 
 ```
 INF gnet proxy started on 0.0.0.0:443
-INF Connection limiter enabled: max 10 per IP+secret
+INF User IP limiter enabled: max 3 IPs per user, block timeout 5m0s
 INF [#1:alice] 203.0.113.5:54321 -> DC 2
 INF [#2:bob] 198.51.100.10:12345 -> DC 4
 INF [#1:alice] closed (45.2s)
@@ -333,6 +342,30 @@ WRN [#2:bob] closed (30s): i/o timeout
 - `#N:user` — Connection ID with matched secret name
 - Duration shown on close
 - Errors on authenticated connections logged as WARN
+
+---
+
+## Metrics
+
+TeleGO exposes Prometheus metrics when configured:
+
+```toml
+[metrics]
+bind-to = "127.0.0.1:9090"
+```
+
+### Available Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `telego_connections_active` | Gauge | Active connections per user |
+| `telego_ips_active` | Gauge | Unique active IPs per user |
+| `telego_ips_blocked` | Gauge | Currently blocked IPs per user |
+| `telego_blocked_total` | Counter | Total IP block events per user |
+| `telego_traffic_in_bytes_total` | Counter | Bytes received from clients |
+| `telego_traffic_out_bytes_total` | Counter | Bytes sent to clients |
+
+All metrics include a `user` label for per-user breakdown.
 
 ---
 
